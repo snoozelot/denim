@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+# tabexec - Execute Commands in Tabular Format
+#
+# Run commands for each input item and format output as aligned table.
+# Supports multipart columns (same header, independent alignment).
+#
+# Usage:
+#   tabexec [OPTIONS] --column NAME CMD ... [--] [ITEMS...]
+#
+# Options:
+#   --column NAME CMD   Define column (repeat for multipart under same NAME)
+#   --left              Left-align preceding column (default)
+#   --right             Right-align preceding column
+#   --tight             Compact multipart: glue parts without internal padding
+#   -d, --delimiter D   Column separator (default: "  ")
+#   --no-header         Skip header row
+#   --no-color          Strip ANSI codes
+#   --chained           Run columns in same shell (for exported functions)
+#   --json              Output JSON array
+#   -P [N]              Parallel execution (N jobs, 0=unlimited)
+#   -h, --help          Show this help
+#
+# Modifiers (--left, --right, --tight) follow --column and apply to that header.
+# Once set, the modifier applies to all columns with the same header name.
+#
+# Examples:
+#   ls | tabexec --column Name "{}" --column Size "du -sh {}"
+#   tabexec --column Dir "{}" --column Files "ls {} | wc -l" -- /tmp /var
+#
+set -euo pipefail
+
+# --- Terminal State (before any redirection) ---
+
+STDOUT_IS_TTY=false
+if [[ -t 1 ]]; then STDOUT_IS_TTY=true; fi
+
+# --- Configuration ---
+
+DELIMITER="  "
+SHOW_HEADER=true
+NO_COLOR=false
+CHAINED=false
+JSON_OUT=false
+PARALLEL=false
+JOBS=0
+
+# --- Data ---
+
+SPECS=()
+ITEMS=()
+HEADERS=()
+COMMANDS=()
+UNIQUE_HEADERS=()
+declare -A HEADER_PARTS
+declare -A HEADER_ALIGN
+declare -A HEADER_TIGHT
+ROWS=()
+COL_WIDTHS=()
+declare -A PART_WIDTHS
+
+# --- Constants ---
+
+SEP=$'\x1f'
+PART_SEP=$'\x1e'
+RESET=$'\033[0m'
+BOLD=$'\033[1m'
+
+# --- Predicates ---
+
+colors_enabled()  { [[ $NO_COLOR == false && $STDOUT_IS_TTY == true ]]; }
+header_enabled()  { [[ $SHOW_HEADER == true ]]; }
+has_items()       { [[ ${#ITEMS[@]} -gt 0 ]]; }
+has_columns()     { [[ ${#SPECS[@]} -gt 0 ]]; }
+is_multipart()    { [[ $1 == *" "* ]]; }
+has_parts()       { [[ $1 == *"$PART_SEP"* ]]; }
+is_wider()        { [[ $1 -gt $2 ]]; }
+is_tight()        { [[ ${HEADER_TIGHT[$1]:-} == true ]]; }
+get_align()       { echo "${HEADER_ALIGN[$1]:-left}"; }
+
+# --- Core Utilities ---
+
+die() { echo "ERROR: $1" >&2; exit 1; }
+
+strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+
+visible_width() {
+    local CLEAN=$(strip_ansi "$1")
+    echo ${#CLEAN}
+}
+
+maybe_strip_color() {
+    if [[ $NO_COLOR == true ]]; then
+        strip_ansi "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+expand_placeholder() {
+    echo "${1//\{\}/$2}"
+}
+
+term_width() {
+    if [[ $STDOUT_IS_TTY != true ]]; then echo 0; return; fi
+    if [[ -n ${COLUMNS:-} ]]; then echo "$COLUMNS"; return; fi
+    if [[ -e /dev/tty ]]; then
+        local SIZE=$(stty size 2>/dev/null </dev/tty || true)
+        if [[ -n $SIZE ]]; then echo "${SIZE#* }"; return; fi
+    fi
+    echo 0
+}
+
+truncate_ansi() {
+    local STR=$1 MAX=$2
+    local LEN=$(visible_width "$STR")
+
+    if [[ $LEN -le $MAX ]]; then echo "$STR"; return; fi
+
+    local OUT="" VISIBLE=0 I=0 N=${#STR}
+    while [[ $I -lt $N && $VISIBLE -lt $MAX ]]; do
+        local C=${STR:$I:1}
+        if [[ $C == $'\x1b' ]]; then
+            while [[ $I -lt $N && ${STR:$I:1} != 'm' ]]; do
+                OUT+=${STR:$I:1}
+                ((++I))
+            done
+            if [[ $I -lt $N ]]; then OUT+=${STR:$I:1}; ((++I)); fi
+        else
+            OUT+=$C
+            ((++VISIBLE))
+            ((++I))
+        fi
+    done
+    echo "${OUT}${RESET}"
+}
+
+maybe_truncate() {
+    local STR=$1
+    local W=$(term_width)
+    if [[ $W -gt 0 ]]; then
+        truncate_ansi "$STR" "$W"
+    else
+        echo "$STR"
+    fi
+}
+
+pad() {
+    local TEXT=$1 WIDTH=$2 ALIGN=${3:-left}
+    local LEN=$(visible_width "$TEXT")
+    local NEED=$((WIDTH - LEN))
+
+    if [[ $NEED -le 0 ]]; then printf '%s' "$TEXT"; return; fi
+
+    if [[ $ALIGN == right ]]; then
+        printf '%*s%s' $NEED '' "$TEXT"
+    else
+        printf '%s%*s' "$TEXT" $NEED ''
+    fi
+}
+
+pad_gap() {
+    local GAP=$1 ALIGN=$2 TEXT=$3
+    if [[ $ALIGN == right ]]; then
+        printf '%*s%s' $GAP '' "$TEXT"
+    else
+        printf '%s%*s' "$TEXT" $GAP ''
+    fi
+}
+
+# --- Argument Parsing ---
+
+usage() { sed -n '2,/^[^#]/{ s/^# \?//p }' "$0"; exit 0; }
+
+parse_args() {
+    local AFTER_SEP=false LAST_HEADER=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)      usage ;;
+            --no-header)    SHOW_HEADER=false; shift ;;
+            --no-color)     NO_COLOR=true; shift ;;
+            --chained)      CHAINED=true; shift ;;
+            --json)         JSON_OUT=true; shift ;;
+            -d|--delimiter) DELIMITER=$2; shift 2 ;;
+            --left)
+                [[ -z $LAST_HEADER ]] && die "--left must follow --column"
+                HEADER_ALIGN[$LAST_HEADER]=left; shift ;;
+            --right)
+                [[ -z $LAST_HEADER ]] && die "--right must follow --column"
+                HEADER_ALIGN[$LAST_HEADER]=right; shift ;;
+            --tight)
+                [[ -z $LAST_HEADER ]] && die "--tight must follow --column"
+                HEADER_TIGHT[$LAST_HEADER]=true; shift ;;
+            --column)
+                [[ $# -lt 3 ]] && die "--column requires NAME and CMD"
+                LAST_HEADER=$2
+                SPECS+=("$2${SEP}$3"); shift 3 ;;
+            -P)
+                PARALLEL=true
+                if [[ $# -gt 1 && $2 =~ ^[0-9]+$ ]]; then
+                    JOBS=$2; shift 2
+                else
+                    JOBS=0; shift
+                fi ;;
+            --)             AFTER_SEP=true; shift ;;
+            -*)             die "Unknown option: $1" ;;
+            "")             shift ;;
+            *)
+                if [[ $AFTER_SEP == true ]]; then
+                    ITEMS+=("$1")
+                else
+                    die "Use -- before items, or --column NAME CMD"
+                fi
+                shift ;;
+        esac
+    done
+}
+
+read_stdin() {
+    local LINE
+    while IFS= read -r LINE; do ITEMS+=("$LINE"); done
+}
+
+# --- Column Setup ---
+
+parse_column_spec() {
+    local SPEC=$1 H C
+    IFS=$SEP read -r H C <<< "$SPEC"
+    echo "${H}${SEP}${C}"
+}
+
+parse_all_columns() {
+    for SPEC in "${SPECS[@]}"; do
+        local PARSED=$(parse_column_spec "$SPEC")
+        local H C
+        IFS=$SEP read -r H C <<< "$PARSED"
+        HEADERS+=("$H"); COMMANDS+=("$C")
+    done
+}
+
+group_by_header() {
+    declare -A SEEN
+    for I in "${!HEADERS[@]}"; do
+        local H=${HEADERS[$I]}
+        if [[ -z ${SEEN[$H]:-} ]]; then
+            UNIQUE_HEADERS+=("$H")
+            SEEN[$H]=1
+            HEADER_PARTS[$H]=$I
+        else
+            HEADER_PARTS[$H]+=" $I"
+        fi
+    done
+}
+
+# --- Command Execution ---
+
+run_command() {
+    local ITEM=$1 CMD=$2
+    local FULL=$(expand_placeholder "$CMD" "$ITEM")
+    local OUT=$(eval "$FULL" 2>/dev/null || true)
+    maybe_strip_color "$OUT"
+}
+
+run_row_sequential() {
+    local ITEM=$1 ROW="" SEP_NEEDED=false
+
+    for H in "${UNIQUE_HEADERS[@]}"; do
+        if [[ $SEP_NEEDED == true ]]; then ROW+=$SEP; fi
+        SEP_NEEDED=true
+
+        local CELL="" PSEP_NEEDED=false
+        for IDX in ${HEADER_PARTS[$H]}; do
+            if [[ $PSEP_NEEDED == true ]]; then CELL+=$PART_SEP; fi
+            PSEP_NEEDED=true
+            CELL+=$(run_command "$ITEM" "${COMMANDS[$IDX]}")
+        done
+        ROW+=$CELL
+    done
+    echo "$ROW"
+}
+
+run_row_chained() {
+    local ITEM=$1 SCRIPT="" SEP_NEEDED=false
+
+    for H in "${UNIQUE_HEADERS[@]}"; do
+        if [[ $SEP_NEEDED == true ]]; then SCRIPT+=" ; printf '%s' '$SEP' ; "; fi
+        SEP_NEEDED=true
+
+        local PSEP_NEEDED=false
+        for IDX in ${HEADER_PARTS[$H]}; do
+            if [[ $PSEP_NEEDED == true ]]; then SCRIPT+=" ; printf '%s' '$PART_SEP' ; "; fi
+            PSEP_NEEDED=true
+            SCRIPT+="$(expand_placeholder "${COMMANDS[$IDX]}" "$ITEM") | tr -d '\\n'"
+        done
+    done
+
+    local OUT=$(eval "$SCRIPT" 2>/dev/null || true)
+    maybe_strip_color "$OUT"
+}
+
+run_row() {
+    local ITEM=$1
+    if [[ $CHAINED == true ]]; then
+        run_row_chained "$ITEM"
+    else
+        run_row_sequential "$ITEM"
+    fi
+}
+
+# --- Data Collection ---
+
+collect_rows() {
+    for ITEM in "${ITEMS[@]}"; do
+        ROWS+=("$(run_row "$ITEM")")
+    done
+}
+
+collect_rows_parallel() {
+    local DIR=$(mktemp -d) N=0
+
+    for ITEM in "${ITEMS[@]}"; do
+        { run_row "$ITEM" > "$DIR/$N"; } &
+        ((++N))
+        if [[ $JOBS -gt 0 && $(jobs -r | wc -l) -ge $JOBS ]]; then wait -n; fi
+    done
+    wait
+
+    for ((I=0; I<${#ITEMS[@]}; I++)); do
+        ROWS+=("$(cat "$DIR/$I")")
+    done
+    rm -rf "$DIR"
+}
+
+collect_all() {
+    if [[ $PARALLEL == true ]]; then
+        collect_rows_parallel
+    else
+        collect_rows
+    fi
+}
+
+# --- Width Calculation ---
+
+init_col_widths() {
+    for I in "${!UNIQUE_HEADERS[@]}"; do
+        COL_WIDTHS[$I]=${#UNIQUE_HEADERS[$I]}
+    done
+}
+
+init_part_widths() {
+    for I in "${!UNIQUE_HEADERS[@]}"; do
+        local PARTS=${HEADER_PARTS[${UNIQUE_HEADERS[$I]}]}
+        if is_multipart "$PARTS"; then
+            local P=0
+            for _ in $PARTS; do PART_WIDTHS["$I:$P"]=0; ((++P)); done
+        fi
+    done
+}
+
+measure_cell() {
+    local I=$1 CELL=$2
+
+    if has_parts "$CELL"; then
+        local PARTS TOTAL=0
+        IFS=$PART_SEP read -ra PARTS <<< "$CELL"
+        local LAST=$((${#PARTS[@]} - 1))
+        for P in "${!PARTS[@]}"; do
+            local W=$(visible_width "${PARTS[$P]}")
+            if is_wider $W ${PART_WIDTHS["$I:$P"]:-0}; then PART_WIDTHS["$I:$P"]=$W; fi
+            TOTAL=$((TOTAL + W))
+        done
+        if is_wider $TOTAL ${COL_WIDTHS[$I]:-0}; then COL_WIDTHS[$I]=$TOTAL; fi
+    else
+        local W=$(visible_width "$CELL")
+        if is_wider $W ${COL_WIDTHS[$I]:-0}; then COL_WIDTHS[$I]=$W; fi
+    fi
+}
+
+measure_all_rows() {
+    for ROW in "${ROWS[@]}"; do
+        local COLS
+        IFS=$SEP read -ra COLS <<< "$ROW"
+        for I in "${!COLS[@]}"; do
+            measure_cell "$I" "${COLS[$I]}"
+        done
+    done
+}
+
+finalize_multipart_widths() {
+    # For non-tight multipart columns, COL_WIDTH = sum of PART_WIDTHS
+    for I in "${!UNIQUE_HEADERS[@]}"; do
+        local H=${UNIQUE_HEADERS[$I]}
+        is_tight "$H" && continue
+        local PARTS_IDX=${HEADER_PARTS[$H]}
+        if is_multipart "$PARTS_IDX"; then
+            local TOTAL=0
+            for IDX in $PARTS_IDX; do
+                local P=$((IDX - ${PARTS_IDX%% *}))
+                TOTAL=$((TOTAL + ${PART_WIDTHS["$I:$P"]:-0}))
+            done
+            if [[ $TOTAL -gt ${COL_WIDTHS[$I]:-0} ]]; then
+                COL_WIDTHS[$I]=$TOTAL
+            fi
+        fi
+    done
+}
+
+compute_widths() {
+    init_col_widths
+    init_part_widths
+    measure_all_rows
+    finalize_multipart_widths
+}
+
+# --- Output Formatting ---
+
+format_multipart_cell() {
+    local CELL=$1 COL=$2 ALIGN=$3
+    local H=${UNIQUE_HEADERS[$COL]}
+    local PARTS OUT=""
+
+    IFS=$PART_SEP read -ra PARTS <<< "$CELL"
+    if is_tight "$H"; then
+        for P in "${!PARTS[@]}"; do
+            OUT+="${PARTS[$P]}"
+        done
+    else
+        for P in "${!PARTS[@]}"; do
+            OUT+=$(pad "${PARTS[$P]}" "${PART_WIDTHS["$COL:$P"]:-0}" left)
+        done
+    fi
+
+    local CELL_W=$(visible_width "$OUT")
+    local COL_W=${COL_WIDTHS[$COL]:-0}
+    if [[ $CELL_W -lt $COL_W ]]; then
+        OUT=$(pad_gap $((COL_W - CELL_W)) "$ALIGN" "$OUT")
+    fi
+    printf '%s' "$OUT"
+}
+
+format_cell() {
+    local CELL=$1 COL=$2 ALIGN=$3
+    local H=${UNIQUE_HEADERS[$COL]}
+    local PARTS_IDX=${HEADER_PARTS[$H]}
+
+    if is_multipart "$PARTS_IDX" && has_parts "$CELL"; then
+        format_multipart_cell "$CELL" "$COL" "$ALIGN"
+    else
+        pad "$CELL" "${COL_WIDTHS[$COL]:-0}" "$ALIGN"
+    fi
+}
+
+format_row() {
+    local ROW=$1 COLS OUT="" SEP_NEEDED=false
+    IFS=$SEP read -ra COLS <<< "$ROW"
+
+    for I in "${!COLS[@]}"; do
+        if [[ $SEP_NEEDED == true ]]; then OUT+=$DELIMITER; fi
+        SEP_NEEDED=true
+        local H=${UNIQUE_HEADERS[$I]}
+        OUT+=$(format_cell "${COLS[$I]}" "$I" "$(get_align "$H")")
+    done
+    maybe_truncate "$OUT"
+}
+
+print_header() {
+    local OUT="" SEP_NEEDED=false
+
+    for I in "${!UNIQUE_HEADERS[@]}"; do
+        if [[ $SEP_NEEDED == true ]]; then OUT+=$DELIMITER; fi
+        SEP_NEEDED=true
+        local H=${UNIQUE_HEADERS[$I]}
+        OUT+=$(pad "$H" "${COL_WIDTHS[$I]}" "$(get_align "$H")")
+    done
+
+    OUT=$(maybe_truncate "$OUT")
+    if colors_enabled; then
+        echo "${BOLD}${OUT}${RESET}"
+    else
+        echo "$OUT"
+    fi
+}
+
+print_table() {
+    compute_widths
+    if header_enabled; then print_header; fi
+    for ROW in "${ROWS[@]}"; do format_row "$ROW"; done
+}
+
+# --- JSON Output ---
+
+json_escape() {
+    local S=$(strip_ansi "$1")
+    S=${S//\\/\\\\}; S=${S//\"/\\\"}
+    S=${S//$'\n'/\\n}; S=${S//$'\r'/\\r}; S=${S//$'\t'/\\t}
+    echo "$S"
+}
+
+print_json_cell() {
+    local CELL=$1 H=$2
+
+    if has_parts "$CELL"; then
+        local PARTS
+        IFS=$PART_SEP read -ra PARTS <<< "$CELL"
+        echo -n "\"$(json_escape "$H")\": ["
+        local COMMA=""
+        for PART in "${PARTS[@]}"; do
+            if [[ -z $PART ]]; then continue; fi
+            echo -n "$COMMA"; COMMA=", "
+            printf '"%s"' "$(json_escape "$PART")"
+        done
+        echo -n "]"
+    else
+        printf '"%s": "%s"' "$(json_escape "$H")" "$(json_escape "$CELL")"
+    fi
+}
+
+print_json_row() {
+    local ROW=$1 COLS
+    IFS=$SEP read -ra COLS <<< "$ROW"
+
+    echo -n "  {"
+    local COMMA=""
+    for I in "${!COLS[@]}"; do
+        echo -n "$COMMA"; COMMA=", "
+        print_json_cell "${COLS[$I]}" "${UNIQUE_HEADERS[$I]}"
+    done
+    echo -n "}"
+}
+
+print_json() {
+    echo "["
+    local COMMA=""
+    for ROW in "${ROWS[@]}"; do
+        echo -n "$COMMA"; COMMA=$',\n'
+        print_json_row "$ROW"
+    done
+    echo
+    echo "]"
+}
+
+# --- Main ---
+
+main() {
+    parse_args "$@"
+
+    has_columns || die "No columns specified"
+    has_items   || read_stdin
+    has_items   || die "No items to process"
+
+    parse_all_columns
+    group_by_header
+    collect_all
+
+    if [[ $JSON_OUT == true ]]; then print_json; else print_table; fi
+}
+
+main "$@"

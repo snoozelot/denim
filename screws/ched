@@ -1,0 +1,172 @@
+#!/bin/bash
+# ched - Cache command output with time-based expiration
+#
+# Caches stdout (and optionally stderr) of commands. On cache hit within
+# timeout, replays cached output. Cache key is command + working directory.
+#
+# Usage:
+#   ched-my [-t SECONDS] [-i] [-e] [--dont-cache-on-error] COMMAND...
+#   ched-my --prune[=DAYS]
+#
+# Options:
+#   -t, --timeout=SECONDS       Cache duration (default: 10)
+#   -i, --ignore-working-dir    Exclude working dir from cache key
+#   -e, --cache-stderr          Cache stderr as well as stdout
+#       --dont-cache-on-error   Don't cache if command fails
+#       --prune[=DAYS]          Delete cache entries older than DAYS (default: 7)
+#
+# Examples:
+#   ched-my -t 60 curl -s https://api.example.com/status
+#   ched-my -i -t 300 expensive-computation
+#   ched-my --prune        # delete entries older than 7 days
+#   ched-my --prune=30     # delete entries older than 30 days
+
+set -euo pipefail
+
+TIMEOUT=10
+IGNORE_WD=false
+CACHE_STDERR=false
+CACHE_ON_ERROR=true
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ched"
+
+# --- Predicates ---
+
+cache_exists()         { [[ -d "$CACHE_DIR" ]]; }
+has_command()          { [[ $# -gt 0 ]]; }
+should_cache_stderr()  { $CACHE_STDERR; }
+should_cache_on_error() { $CACHE_ON_ERROR; }
+should_include_workdir() { ! $IGNORE_WD; }
+succeeded()            { [[ "$1" -eq 0 ]]; }
+
+is_fresh() {
+    [[ -f "$1" ]] || return 1
+    local AGE=$(( $(date +%s) - $(stat -c %Y "$1") ))
+    [[ $AGE -lt $TIMEOUT ]]
+}
+
+cache_hit() { is_fresh "$STDOUT" && is_fresh "$RC"; }
+
+# --- Actions ---
+
+die() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+usage: ched-my [-t SECONDS] [-i] [-e] [--dont-cache-on-error] command...
+       ched-my --prune[=DAYS]
+
+Options:
+  -t, --timeout=SECONDS       Cache duration (default: 10)
+  -i, --ignore-working-dir    Ignore working dir in cache key
+  -e, --cache-stderr          Cache stderr as well as stdout
+      --dont-cache-on-error   Don't cache if command fails
+      --prune[=DAYS]          Delete cache entries older than DAYS (default: 7)
+  -h, --help                  Show this help
+EOF
+    exit 0
+}
+
+prune_old_entries() {
+    local DAYS="${1:-7}"
+    cache_exists || exit 0
+    find "$CACHE_DIR" -type f -mtime +"$DAYS" -delete
+    find "$CACHE_DIR" -type d -empty -delete 2>/dev/null || true
+}
+
+make_cache_key() {
+    local KEY="$*"
+    should_include_workdir && KEY="$PWD:$KEY"
+    printf '%s' "$KEY" | md5sum | cut -d' ' -f1
+}
+
+replay_cached() {
+    cat "$STDOUT"
+    should_cache_stderr && [[ -f "$STDERR" ]] && cat "$STDERR" >&2
+    return "$(cat "$RC")"
+}
+
+discard_cache() { rm -f "$STDOUT" "$STDERR" "$RC"; }
+
+run_and_cache() {
+    local CODE=0
+    if should_cache_stderr; then
+        "$@" > >(tee "$STDOUT") 2> >(tee "$STDERR" >&2) || CODE=$?
+    else
+        "$@" > >(tee "$STDOUT") || CODE=$?
+    fi
+    wait
+
+    if should_cache_on_error || succeeded "$CODE"; then
+        echo "$CODE" >"$RC"
+    else
+        discard_cache
+    fi
+    return "$CODE"
+}
+
+# --- Option parsing ---
+
+parse_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -t | --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --timeout=*)
+            TIMEOUT="${1#*=}"
+            shift
+            ;;
+        -i | --ignore-working-dir)
+            IGNORE_WD=true
+            shift
+            ;;
+        -e | --cache-stderr)
+            CACHE_STDERR=true
+            shift
+            ;;
+        --dont-cache-on-error)
+            CACHE_ON_ERROR=false
+            shift
+            ;;
+        --prune)
+            prune_old_entries
+            exit 0
+            ;;
+        --prune=*)
+            prune_old_entries "${1#*=}"
+            exit 0
+            ;;
+        -h | --help) usage ;;
+        --)
+            shift
+            break
+            ;;
+        -*) die "unknown option: $1" ;;
+        *) break ;;
+        esac
+    done
+    CMD=("$@")
+}
+
+# --- Main ---
+
+main() {
+    parse_options "$@"
+    has_command "${CMD[@]}" || die "no command given"
+
+    local HASH
+    HASH=$(make_cache_key "${CMD[@]}")
+    STDOUT="$CACHE_DIR/$HASH.stdout"
+    STDERR="$CACHE_DIR/$HASH.stderr"
+    RC="$CACHE_DIR/$HASH.rc"
+
+    mkdir -p "$CACHE_DIR"
+
+    cache_hit && replay_cached || run_and_cache "${CMD[@]}"
+}
+
+main "$@"

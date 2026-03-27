@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# zrun - Run command with transparently decompressed file arguments
+#
+# Any compressed file arguments are decompressed to temp files, and the
+# command runs with decompressed versions. Temp files are cleaned up after.
+#
+# Usage:
+#   zrun COMMAND [ARGS...]
+#   zCOMMAND [ARGS...]          (when symlinked as zless, zcat, etc.)
+#
+# Supported formats:
+#   gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3, Z, lzo
+#
+# Examples:
+#   zrun vim file.txt.gz       Open compressed file in vim
+#   zrun diff a.txt.xz b.txt   Diff compressed vs uncompressed
+#   zrun wc -l *.log.zst       Word count on multiple compressed files
+#
+# Symlink usage:
+#   ln -s zrun zvim            Then: zvim file.gz
+
+set -euo pipefail
+
+TEMPFILES=()
+
+cleanup() {
+    for F in "${TEMPFILES[@]}"; do
+        rm -f "$F"
+    done
+}
+
+trap cleanup EXIT
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# Detect compression type from extension
+detect_compression() {
+    local F="$1"
+    case "${F,,}" in
+        *.gz)       echo "gz" ;;
+        *.bz2)      echo "bz2" ;;
+        *.xz)       echo "xz" ;;
+        *.zst)      echo "zst" ;;
+        *.lz4)      echo "lz4" ;;
+        *.lzma)     echo "lzma" ;;
+        *.lz)       echo "lz" ;;
+        *.br)       echo "br" ;;
+        *.sz)       echo "sz" ;;
+        *.bz3)      echo "bz3" ;;
+        *.z)        echo "Z" ;;
+        *.lzo)      echo "lzo" ;;
+        *)          echo "" ;;
+    esac
+}
+
+# Strip compression extension
+strip_ext() {
+    local F="$1"
+    case "${F,,}" in
+        *.gz)       echo "${F%.gz}" ;;
+        *.bz2)      echo "${F%.bz2}" ;;
+        *.xz)       echo "${F%.xz}" ;;
+        *.zst)      echo "${F%.zst}" ;;
+        *.lz4)      echo "${F%.lz4}" ;;
+        *.lzma)     echo "${F%.lzma}" ;;
+        *.lz)       echo "${F%.lz}" ;;
+        *.br)       echo "${F%.br}" ;;
+        *.sz)       echo "${F%.sz}" ;;
+        *.bz3)      echo "${F%.bz3}" ;;
+        *.z)        echo "${F%.z}" ;;
+        *.lzo)      echo "${F%.lzo}" ;;
+        *)          echo "$F" ;;
+    esac
+}
+
+# Decompress file to temp, return temp path
+decompress_to_temp() {
+    local SRC="$1"
+    local TYPE="$2"
+    local BASENAME TEMPFILE
+
+    BASENAME=$(basename "$(strip_ext "$SRC")")
+    TEMPFILE=$(mktemp --suffix="-$BASENAME")
+    TEMPFILES+=("$TEMPFILE")
+
+    case "$TYPE" in
+        gz)     gunzip -c "$SRC" > "$TEMPFILE" ;;
+        bz2)    bunzip2 -c "$SRC" > "$TEMPFILE" ;;
+        xz)     xz -dc "$SRC" > "$TEMPFILE" ;;
+        zst)    zstd -dc "$SRC" > "$TEMPFILE" ;;
+        lz4)    lz4 -dc "$SRC" > "$TEMPFILE" ;;
+        lzma)   lzma -dc "$SRC" > "$TEMPFILE" ;;
+        lz)     lzip -dc "$SRC" > "$TEMPFILE" ;;
+        br)     brotli -dc "$SRC" > "$TEMPFILE" ;;
+        sz)     snunzip -c "$SRC" > "$TEMPFILE" ;;
+        bz3)    bzip3 -dc "$SRC" > "$TEMPFILE" ;;
+        Z)      uncompress -c "$SRC" > "$TEMPFILE" ;;
+        lzo)    lzop -dc "$SRC" > "$TEMPFILE" ;;
+        *)      die "Unknown compression: $TYPE" ;;
+    esac
+
+    echo "$TEMPFILE"
+}
+
+# Process arguments, decompress compressed files
+process_args() {
+    local ARGS=()
+    for ARG in "$@"; do
+        # Only process existing files
+        if [[ -f "$ARG" ]]; then
+            TYPE=$(detect_compression "$ARG")
+            if [[ -n "$TYPE" ]]; then
+                TEMP=$(decompress_to_temp "$ARG" "$TYPE")
+                ARGS+=("$TEMP")
+                continue
+            fi
+        fi
+        ARGS+=("$ARG")
+    done
+    printf '%s\0' "${ARGS[@]}"
+}
+
+# Main
+usage() {
+    cat << 'EOF'
+Usage: zrun COMMAND [ARGS...]
+
+Run command with compressed files transparently decompressed.
+
+Supported: gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3, Z, lzo
+
+Examples:
+  zrun vim file.txt.gz
+  zrun diff a.txt.xz b.txt.bz2
+  zrun grep pattern *.log.zst
+
+Symlink usage:
+  ln -s zrun zvim
+  zvim file.gz
+EOF
+    exit 1
+}
+
+# Check if invoked as z<command> symlink
+INVOKED=$(basename "$0")
+if [[ "$INVOKED" == z* && "$INVOKED" != "zrun" ]]; then
+    CMD="${INVOKED#z}"
+else
+    [[ $# -ge 1 ]] || usage
+    CMD="$1"
+    shift
+fi
+
+[[ $# -ge 1 ]] || usage
+
+# Process args and run command
+mapfile -d '' PROCESSED < <(process_args "$@")
+exec "$CMD" "${PROCESSED[@]}"
