@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# worth-the-time-xkcd-1205 - calculate if automation is worth the time
+#
+# How long can you work on making a routine task more efficient before
+# you're spending more time than you save? Given any 3 of 5 parameters,
+# calculates the remaining 2.
+#
+# Parameters:
+#   D = task duration        time to perform task manually once
+#   I = recurrence interval  how often the task occurs
+#   T = projection timerange time period to project over
+#   S = saved                total time saved (automation budget)
+#   N = occurrences          how many times task occurs
+#
+# Relationships: N = T / I,  S = D * N
+#
+# Usage:
+#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --projection-timerange 1y
+#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --saved 8h
+#
+# Dependencies: bc, bash 4.3+
+#
+# References:
+#   https://xkcd.com/1205/
+#   https://www.explainxkcd.com/wiki/index.php/1205:_Is_It_Worth_the_Time%3F
+#   https://erick.rudiak.com/blog/xkcd-1205-inverted/
+
+set -euo pipefail
+
+# --- Constants ---
+
+readonly SECS_PER=(31536000 604800 86400 3600 60 1)  # year week day hour minute second
+readonly UNIT=(y w d h m s)
+readonly UNIT_SING=(year week day hour minute second)
+readonly UNIT_PLUR=(years weeks days hours minutes seconds)
+
+readonly LABEL_WIDTH=22
+
+# bit flags for which parameters were calculated
+readonly BIT_D=1
+readonly BIT_I=2
+readonly BIT_T=4
+readonly BIT_S=8
+readonly BIT_N=16
+
+# --- Core predicates ---
+
+die()              { echo "Error: $1" >&2; exit 1; }
+got()              { [[ -n $1 ]]; }
+is_set()           { [[ -n ${!1} ]]; }
+is_float()         { [[ $1 =~ ^-?[0-9]+\.?[0-9]*$ ]]; }
+has_value()        { [[ $1 -gt 0 ]]; }
+has_arguments()    { [[ $# -gt 0 ]]; }
+has_option_value() { [[ $# -ge 2 ]]; }
+parsed_time()      { [[ $1 != 0 ]]; }
+all_solved()       { is_set D && is_set I && is_set T && is_set S && is_set N; }
+
+# --- Parsing ---
+
+unit_to_seconds() {
+    local U="${1,,}"
+    local K
+
+    for K in "${!UNIT[@]}"; do
+        [[ $U == "${UNIT[$K]}" ]]      && { echo "${SECS_PER[$K]}"; return 0; }
+        [[ $U == "${UNIT_SING[$K]}" ]] && { echo "${SECS_PER[$K]}"; return 0; }
+        [[ $U == "${UNIT_PLUR[$K]}" ]] && { echo "${SECS_PER[$K]}"; return 0; }
+    done
+    return 1
+}
+
+parse_time() {
+    local STR=$1
+    local TOTAL=0
+    local REST=$STR
+    local VAL
+    local U
+    local MULT
+
+    while got "$REST"; do
+        [[ $REST =~ ^([0-9]+\.?[0-9]*)([a-zA-Z]+)(.*)$ ]] || die "Invalid time: $STR"
+        VAL=${BASH_REMATCH[1]}
+        U=${BASH_REMATCH[2]}
+        REST=${BASH_REMATCH[3]}
+        MULT=$(unit_to_seconds "$U") || die "Unknown unit: $U"
+        TOTAL=$(calc "$TOTAL + $VAL * $MULT")
+    done
+    parsed_time "$TOTAL" || die "Invalid time: $STR"
+    echo "$TOTAL"
+}
+
+parse_number() {
+    is_float "$1" || die "Invalid number: $1"
+    echo "$1"
+}
+
+# --- Solver ---
+# Two equations: N = T/I, S = D*N. Two passes solves all valid combos.
+
+calc() { echo "scale=10; $1" | bc; }
+
+count_params() {
+    local C=0
+    is_set D && C=$((C + 1))
+    is_set I && C=$((C + 1))
+    is_set T && C=$((C + 1))
+    is_set S && C=$((C + 1))
+    is_set N && C=$((C + 1))
+    echo "$C"
+}
+
+param_count_is() { [[ $(count_params) -eq $1 ]]; }
+
+solve() {
+    param_count_is 3 || die "Exactly 3 parameters required"
+
+    for _ in 1 2; do
+        is_set T && is_set I && ! is_set N && N=$(calc "$T / $I")
+        is_set T && is_set N && ! is_set I && I=$(calc "$T / $N")
+        is_set I && is_set N && ! is_set T && T=$(calc "$I * $N")
+        is_set D && is_set N && ! is_set S && S=$(calc "$D * $N")
+        is_set S && is_set N && ! is_set D && D=$(calc "$S / $N")
+        is_set D && is_set S && ! is_set N && N=$(calc "$S / $D")
+    done
+
+    all_solved || die "Cannot solve for all parameters"
+}
+
+# --- Display ---
+
+declare -a ROW0 ROW1 ROW2 ROW3 WIDTHS
+
+decompose() {
+    local SECS=$1
+    local REM
+    declare -n ROW=$2
+
+    REM=$(printf "%.0f" "$SECS")
+    for C in 0 1 2 3 4 5; do
+        ROW[$C]=$((REM / SECS_PER[C]))
+        REM=$((REM % SECS_PER[C]))
+    done
+}
+
+find_unit_range() {
+    FIRST=5 LAST=0
+    for C in 0 1 2 3 4 5; do
+        for V in "${ROW0[$C]}" "${ROW1[$C]}" "${ROW2[$C]}" "${ROW3[$C]}"; do
+            has_value "$V" || continue
+            if ((C < FIRST)); then FIRST=$C; fi
+            if ((C > LAST)); then LAST=$C; fi
+        done
+    done
+}
+
+compute_widths() {
+    local MAX
+    local W
+
+    for ((C=FIRST; C<=LAST; C++)); do
+        MAX=0
+        for V in "${ROW0[$C]}" "${ROW1[$C]}" "${ROW2[$C]}" "${ROW3[$C]}"; do
+            W=$((${#V} + ${#UNIT[$C]} + 1))
+            if ((W > MAX)); then MAX=$W; fi
+        done
+        WIDTHS[$C]=$MAX
+    done
+}
+
+print_unit() {
+    local V=$1
+    local C=$2
+    local W=$3
+    local NUM_W
+
+    NUM_W=$((W - ${#UNIT[$C]}))
+    printf "%${NUM_W}d%s" "$V" "${UNIT[$C]}"
+}
+
+print_time() {
+    declare -n ROW=$1
+    local PAST_ZEROS=0
+
+    for ((C=FIRST; C<=LAST; C++)); do
+        if has_value "${ROW[$C]}"; then PAST_ZEROS=1; fi
+        if ((PAST_ZEROS)); then
+            print_unit "${ROW[$C]}" "$C" "${WIDTHS[$C]}"
+        else
+            printf "%${WIDTHS[$C]}s" ""
+        fi
+    done
+}
+
+was_calculated() { ((CALC & $1)); }
+
+setup_display() {
+    decompose "$D" ROW0
+    decompose "$I" ROW1
+    decompose "$T" ROW2
+    decompose "$S" ROW3
+    find_unit_range
+    compute_widths
+}
+
+occ_width() {
+    local FMT
+    local W
+
+    printf -v FMT " %.1f" "$N"
+    W=${#FMT}
+    if ((W < 4)); then W=4; fi
+    echo "$W"
+}
+
+print_time_row() {
+    local LBL=$1
+    local ROW=$2
+    local BIT=$3
+    local OCC_W=$4
+
+    if was_calculated "$BIT"; then LBL+="?"; fi
+    printf "%-${LABEL_WIDTH}s%${OCC_W}s" "$LBL" ""
+    print_time "$ROW"
+    printf "\n"
+}
+
+print_occ_row() {
+    local LBL="occurrences"
+    local OCC_W=$1
+
+    if was_calculated $BIT_N; then LBL+="?"; fi
+    printf "%-${LABEL_WIDTH}s%${OCC_W}.1f\n" "$LBL" "$N"
+}
+
+display() {
+    local OCC_W
+
+    setup_display
+    OCC_W=$(occ_width)
+    print_time_row "task duration"        ROW0 $BIT_D "$OCC_W"
+    print_time_row "recurrence interval"  ROW1 $BIT_I "$OCC_W"
+    print_time_row "projection timerange" ROW2 $BIT_T "$OCC_W"
+    print_time_row "saved"                ROW3 $BIT_S "$OCC_W"
+    print_occ_row "$OCC_W"
+}
+
+# --- Help ---
+
+show_help() {
+    cat <<'EOF'
+Usage: worth-the-time-xkcd-1205 [options]
+
+How long can you work on automating a task before you spend more time than you save?
+Provide any 3 of 5 parameters to calculate the rest.
+
+Relationships: N = T / I,  S = D * N
+
+  --task-duration <time>         (D) Time to perform task once (e.g., 5m)
+  --recurrence-interval <time>   (I) How often task occurs (e.g., 1d)
+  --projection-timerange <time>  (T) Time period to project over (e.g., 1y)
+  --saved <time>                 (S) Total time saved (e.g., 8h)
+  --occurrences <number>         (N) Number of task occurrences
+  -h, --help                     Show this help
+
+Examples:
+  worth-the-time-xkcd-1205  --task-duration 5m  --recurrence-interval 1d  --projection-timerange 1y
+  worth-the-time-xkcd-1205  --task-duration 5m  --recurrence-interval 1d                             --saved 8h
+  worth-the-time-xkcd-1205  --task-duration 5m  --recurrence-interval 1d                                         --occurrences 100
+  worth-the-time-xkcd-1205  --task-duration 5m                            --projection-timerange 1y  --saved 1d
+  worth-the-time-xkcd-1205  --task-duration 5m                            --projection-timerange 1y              --occurrences 365
+  worth-the-time-xkcd-1205  --task-duration 5m                                                       --saved 1h  --occurrences  12
+  worth-the-time-xkcd-1205                      --recurrence-interval 2d  --projection-timerange 1y  --saved 1d
+  worth-the-time-xkcd-1205                      --recurrence-interval 2d                             --saved 1d  --occurrences  28.8
+  worth-the-time-xkcd-1205                                                --projection-timerange 1y  --saved 1d  --occurrences 365
+EOF
+}
+
+# --- Main ---
+
+require_value() { has_option_value "$@" || die "Missing value for $1"; }
+
+parse_args() {
+    D="" I="" T="" S="" N=""
+    while has_arguments "$@"; do
+        case $1 in
+            -h|--help)              show_help; exit 0 ;;
+            --task-duration)        require_value "$@"; D=$(parse_time "$2"); shift 2 ;;
+            --recurrence-interval)  require_value "$@"; I=$(parse_time "$2"); shift 2 ;;
+            --projection-timerange) require_value "$@"; T=$(parse_time "$2"); shift 2 ;;
+            --saved)                require_value "$@"; S=$(parse_time "$2"); shift 2 ;;
+            --occurrences)          require_value "$@"; N=$(parse_number "$2"); shift 2 ;;
+            *)                      die "Unknown option $1" ;;
+        esac
+    done
+}
+
+compute_calc_bits() {
+    CALC=0
+    is_set D || CALC=$((CALC | BIT_D))
+    is_set I || CALC=$((CALC | BIT_I))
+    is_set T || CALC=$((CALC | BIT_T))
+    is_set S || CALC=$((CALC | BIT_S))
+    is_set N || CALC=$((CALC | BIT_N))
+}
+
+main() {
+    has_arguments "$@" || { show_help; exit 0; }
+    parse_args "$@"
+    compute_calc_bits
+    solve
+    display
+}
+
+main "$@"
