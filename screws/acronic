@@ -1,0 +1,8 @@
+#!/bin/bash
+# acronic - Run cronic asynchronously in background, fully detached
+#
+# Usage: acronic COMMAND [ARGS...]
+#
+# Runs cronic (silent unless fail) via setsid, completely detached from terminal.
+
+setsid cronic "$@" &>/dev/null &

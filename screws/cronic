@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# cronic - Run commands quietly unless they fail
+#
+# Usage: cronic LOG_FILE SCRIPT
+#
+# Executes a bash script silently, only producing output if the command
+# fails (non-zero exit). Useful for cron jobs where you only want
+# notifications on failure.
+#
+# Features:
+#   - Captures stdout and stderr separately with timestamps
+#   - Supports placeholders in LOG_FILE: ISOSTAMP, PID, RANDOM
+#   - Logs PWD, ARGV, and EXIT status for debugging
+#   - Temporary files cleaned up automatically
+#   - Exit status of the original command is preserved
+#
+# Example:
+#   cronic /var/log/backup-ISOSTAMP.log /usr/local/bin/backup.sh
+#
+
+set -euo pipefail
+
+# --- config ---
+
+TIMESPEC="%b %d %H:%M:%.S"
+
+# --- predicates ---
+
+failed()    { [[ $1 -ne 0 ]]; }
+has_args()  { [[ $# -ge 2 ]]; }
+
+# --- actions ---
+
+usage() {
+    echo "Usage: $0 LOG_FILE SCRIPT"
+    echo "Run bash SCRIPT quietly unless it fails, log to LOG_FILE"
+    echo "Placeholders: ISOSTAMP, PID, RANDOM"
+    exit 1
+}
+
+expand_placeholders() {
+    local TEMPLATE="$1"
+    local STAMP="$2"
+
+    echo "$TEMPLATE" \
+    | sed -e "s/ISOSTAMP/${STAMP}/g" \
+          -e "s/PID/$$/g" \
+          -e "s/RANDOM/${RANDOM}/g"
+}
+
+ts_log() {
+    local FILE="$1"
+    ts "$TIMESPEC" >> "$FILE"
+}
+
+log_context() {
+    local FILE="$1"
+    local KEY="$2"
+
+    shift 2
+    printf '%s %s\n' "$KEY" "$*" | ts_log "$FILE"
+}
+
+cleanup() {
+    rm -f "$STDOUT_LOG" "$STDERR_LOG"
+}
+
+output_on_failure() {
+    local STATUS="$1"
+    failed "$STATUS" || return 0
+    cat "$STDOUT_LOG" >&1
+    cat "$STDERR_LOG" >&2
+}
+
+log_join() {
+    { cat "$STDOUT_LOG" "$STDERR_LOG"; echo; } >> "$LOG"
+}
+
+# --- main ---
+
+has_args "$@" || usage
+
+TIMESTAMP=$(date +%Y%m%dT%H%M%S)
+
+LOG=$(expand_placeholders "$1" "$TIMESTAMP")
+STDOUT_LOG="${LOG}-stdout"
+STDERR_LOG="${LOG}-stderr"
+shift
+SCRIPT="$*"
+
+trap cleanup EXIT INT TERM HUP
+touch "$LOG" "$STDOUT_LOG" "$STDERR_LOG"
+
+log_context "$STDOUT_LOG" PWD "$PWD"
+log_context "$STDOUT_LOG" ARGV "$0" "$LOG" "$SCRIPT"
+
+bash -c "$SCRIPT" \
+    1> >(ts "$TIMESPEC STDOUT" >> "$STDOUT_LOG") \
+    2> >(ts "$TIMESPEC STDERR" >> "$STDERR_LOG") \
+    || STATUS=$?
+
+STATUS=${STATUS:-0}
+
+# wait for process substitutions (ts pipelines) to finish writing
+wait
+
+log_context "$STDERR_LOG" EXIT "$STATUS"
+output_on_failure "$STATUS"
+log_join
+exit "$STATUS"
