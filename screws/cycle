@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Cycle through a ring of options, return the next item after current
+# Usage: cycle --current <current> <item1> <item2> ... <itemN>
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} --current <current> <item1> ... <itemN>
+Cycles through items, returns next after current.
+If current is last or not found, returns first.
+EOF
+}
+
+is_match() { [[ "$1" == "$2" ]]; }
+
+find_next() {
+    local CURRENT="$1"; shift
+    local RING=("$@")
+    local FOUND=false
+
+    for ITEM in "${RING[@]}"; do
+        $FOUND && { echo "$ITEM"; return; }
+        is_match "$ITEM" "$CURRENT" && FOUND=true
+    done
+
+    echo "${RING[0]}"
+}
+
+# Parse options
+CURRENT=""
+OPTS=$(getopt -o "h" --long "current:,help" -- "$@") || die "Usage: ${0##*/} --current <current> <items...>"
+eval set -- "$OPTS"
+
+while true; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --current) CURRENT="$2"; shift 2 ;;
+        --) shift; break ;;
+    esac
+done
+
+RING=("$@")
+
+# Validate
+[[ -n "$CURRENT" ]] || die "Missing --current argument"
+[[ ${#RING[@]} -ge 1 ]] || die "Need at least one ring item"
+
+find_next "$CURRENT" "${RING[@]}"
