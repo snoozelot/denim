@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# arc - Universal archive tool
+#
+# Simple wrapper for common archive formats. Detects format by extension
+# and calls the appropriate tool. Smart extraction creates subdirectory
+# when archive contains multiple top-level entries (prevents tarbombs).
+#
+# Usage:
+#   arc x ARCHIVE [DIR]     Extract archive (to DIR if specified)
+#   arc l ARCHIVE           List contents
+#   arc c ARCHIVE FILES...  Create archive (format from extension)
+#   arc t ARCHIVE           Test archive integrity
+#
+# Supported formats:
+#   tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, tar.lzma, tar.lz, tar.br
+#   gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3
+#   zip, 7z, rar, lzh/lha, cab, ace
+#   deb, rpm, cpio, ar
+#   exe (Inno Setup), InstallShield
+#   cbz, cbr, cb7, cbt (comic books)
+
+set -euo pipefail
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# Strip archive extension to get base name
+strip_ext() {
+    local F="$1"
+    # tar compounds
+    F="${F%.tar.gz}"; F="${F%.tgz}"
+    F="${F%.tar.bz2}"; F="${F%.tbz2}"; F="${F%.tbz}"
+    F="${F%.tar.xz}"; F="${F%.txz}"
+    F="${F%.tar.zst}"; F="${F%.tzst}"
+    F="${F%.tar.lz4}"; F="${F%.tar.lzma}"; F="${F%.tar.lz}"; F="${F%.tar.br}"
+    F="${F%.tar.sz}"; F="${F%.tar.bz3}"
+    F="${F%.tar}"
+    # single compression
+    F="${F%.gz}"; F="${F%.bz2}"; F="${F%.xz}"; F="${F%.zst}"
+    F="${F%.lz4}"; F="${F%.lzma}"; F="${F%.lz}"; F="${F%.br}"
+    F="${F%.sz}"; F="${F%.bz3}"
+    # archives
+    F="${F%.zip}"; F="${F%.jar}"; F="${F%.war}"; F="${F%.apk}"
+    F="${F%.7z}"; F="${F%.rar}"; F="${F%.lzh}"; F="${F%.lha}"
+    F="${F%.cab}"; F="${F%.ace}"
+    F="${F%.deb}"; F="${F%.rpm}"; F="${F%.cpio}"; F="${F%.a}"; F="${F%.ar}"
+    # installers
+    F="${F%.exe}"
+    # comic books
+    F="${F%.cbz}"; F="${F%.cbr}"; F="${F%.cb7}"; F="${F%.cbt}"
+    basename "$F"
+}
+
+# Count top-level entries in archive
+count_toplevel() {
+    local ARCHIVE="$1"
+    local TYPE="$2"
+    local LISTING
+
+    case "$TYPE" in
+        tar|tar.gz|tar.bz2|tar.xz|tar.zst|tar.lzma|tar.lz)
+            LISTING=$(cmd_list "$ARCHIVE" 2>/dev/null) ;;
+        tar.lz4)
+            LISTING=$(lz4 -dc "$ARCHIVE" 2>/dev/null | tar -tf - 2>/dev/null) ;;
+        tar.br)
+            LISTING=$(brotli -dc "$ARCHIVE" 2>/dev/null | tar -tf - 2>/dev/null) ;;
+        tar.sz)
+            LISTING=$(snunzip -c "$ARCHIVE" 2>/dev/null | tar -tf - 2>/dev/null) ;;
+        tar.bz3)
+            LISTING=$(bzip3 -dc "$ARCHIVE" 2>/dev/null | tar -tf - 2>/dev/null) ;;
+        zip|cbz)
+            LISTING=$(unzip -Z1 "$ARCHIVE" 2>/dev/null) ;;
+        7z|cb7)
+            LISTING=$(7z l -slt "$ARCHIVE" 2>/dev/null | sed -n 's/^Path = //p' | tail -n +2) ;;
+        rar|cbr)
+            LISTING=$(unrar lb "$ARCHIVE" 2>/dev/null) ;;
+        cbt)
+            LISTING=$(tar -tf "$ARCHIVE" 2>/dev/null) ;;
+        lzh)
+            LISTING=$(lha l "$ARCHIVE" 2>/dev/null | awk 'NR>2 {print $NF}') ;;
+        cab)
+            LISTING=$(cabextract -l "$ARCHIVE" 2>/dev/null | awk 'NR>3 {print $NF}') ;;
+        exe)
+            LISTING=$(innoextract -l "$ARCHIVE" 2>/dev/null | sed -n 's/^ - //p') ;;
+        *)
+            echo "1"; return ;;
+    esac
+
+    # Extract first path component, count unique
+    printf '%s\n' "$LISTING" \
+        | sed 's|/.*||' \
+        | sort -u \
+        | wc -l
+}
+
+# Detect archive type from filename
+detect_type() {
+    local F="$1"
+    case "${F,,}" in
+        # tar compounds
+        *.tar.gz|*.tgz)         echo "tar.gz" ;;
+        *.tar.bz2|*.tbz2|*.tbz) echo "tar.bz2" ;;
+        *.tar.xz|*.txz)         echo "tar.xz" ;;
+        *.tar.zst|*.tzst)       echo "tar.zst" ;;
+        *.tar.lz4)              echo "tar.lz4" ;;
+        *.tar.lzma)             echo "tar.lzma" ;;
+        *.tar.lz|*.tlz)         echo "tar.lz" ;;
+        *.tar.br|*.tbr)         echo "tar.br" ;;
+        *.tar.sz)               echo "tar.sz" ;;
+        *.tar.bz3)              echo "tar.bz3" ;;
+        *.tar)                  echo "tar" ;;
+        # single compression
+        *.gz)                   echo "gz" ;;
+        *.bz2)                  echo "bz2" ;;
+        *.xz)                   echo "xz" ;;
+        *.zst)                  echo "zst" ;;
+        *.lz4)                  echo "lz4" ;;
+        *.lzma)                 echo "lzma" ;;
+        *.lz)                   echo "lz" ;;
+        *.br)                   echo "br" ;;
+        *.sz)                   echo "sz" ;;
+        *.bz3)                  echo "bz3" ;;
+        # archives
+        *.zip|*.jar|*.war|*.apk) echo "zip" ;;
+        *.7z)                   echo "7z" ;;
+        *.rar)                  echo "rar" ;;
+        *.lzh|*.lha)            echo "lzh" ;;
+        *.cab)                  echo "cab" ;;
+        *.ace)                  echo "ace" ;;
+        # packages
+        *.deb)                  echo "deb" ;;
+        *.rpm)                  echo "rpm" ;;
+        *.cpio)                 echo "cpio" ;;
+        *.a|*.ar)               echo "ar" ;;
+        # installers
+        *.exe)                  echo "exe" ;;
+        # comic books (aliases)
+        *.cbz)                  echo "cbz" ;;
+        *.cbr)                  echo "cbr" ;;
+        *.cb7)                  echo "cb7" ;;
+        *.cbt)                  echo "cbt" ;;
+        *)                      die "Unknown archive type: $F" ;;
+    esac
+}
+
+# Try InstallShield first, fall back to MS Cabinet
+extract_cab() {
+    local ARCHIVE="$1"
+    local DEST="$2"
+    # Check if InstallShield format (has data1.hdr nearby or specific signature)
+    if unshield t "$ARCHIVE" &>/dev/null; then
+        unshield -d "$DEST" x "$ARCHIVE"
+    else
+        cabextract -d "$DEST" "$ARCHIVE"
+    fi
+}
+
+# Extract archive (smart: creates subdir if multiple top-level entries)
+cmd_extract() {
+    local ARCHIVE="$1"
+    local DEST="${2:-.}"
+    local TYPE COUNT SUBDIR
+
+    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+
+    TYPE=$(detect_type "$ARCHIVE")
+    COUNT=$(count_toplevel "$ARCHIVE" "$TYPE")
+
+    # Create subdir if multiple top-level entries (prevent tarbomb)
+    if [[ "$COUNT" -gt 1 ]]; then
+        SUBDIR=$(strip_ext "$ARCHIVE")
+        DEST="$DEST/$SUBDIR"
+        [[ -e "$DEST" ]] && die "Destination already exists: $DEST"
+        printf 'Extracting to %s/\n' "$DEST"
+    fi
+
+    mkdir -p "$DEST"
+
+    case "$TYPE" in
+        # tar variants
+        tar)        tar -xf "$ARCHIVE" -C "$DEST" ;;
+        tar.gz)     tar -xzf "$ARCHIVE" -C "$DEST" ;;
+        tar.bz2)    tar -xjf "$ARCHIVE" -C "$DEST" ;;
+        tar.xz)     tar -xJf "$ARCHIVE" -C "$DEST" ;;
+        tar.zst)    tar --zstd -xf "$ARCHIVE" -C "$DEST" ;;
+        tar.lz4)    lz4 -dc "$ARCHIVE" | tar -xf - -C "$DEST" ;;
+        tar.lzma)   tar --lzma -xf "$ARCHIVE" -C "$DEST" ;;
+        tar.lz)     tar --lzip -xf "$ARCHIVE" -C "$DEST" ;;
+        tar.br)     brotli -dc "$ARCHIVE" | tar -xf - -C "$DEST" ;;
+        tar.sz)     snunzip -c "$ARCHIVE" | tar -xf - -C "$DEST" ;;
+        tar.bz3)    bzip3 -dc "$ARCHIVE" | tar -xf - -C "$DEST" ;;
+        # single file compression
+        gz)         gunzip -c "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.gz}")" ;;
+        bz2)        bunzip2 -c "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.bz2}")" ;;
+        xz)         xz -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.xz}")" ;;
+        zst)        zstd -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.zst}")" ;;
+        lz4)        lz4 -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.lz4}")" ;;
+        lzma)       lzma -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.lzma}")" ;;
+        lz)         lzip -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.lz}")" ;;
+        br)         brotli -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.br}")" ;;
+        sz)         snunzip -c "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.sz}")" ;;
+        bz3)        bzip3 -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.bz3}")" ;;
+        # archives
+        zip|cbz)    unzip -q "$ARCHIVE" -d "$DEST" ;;
+        7z|cb7)     7z x -o"$DEST" "$ARCHIVE" ;;
+        rar|cbr)    unrar x "$ARCHIVE" "$DEST/" ;;
+        lzh)        lha xw="$DEST" "$ARCHIVE" ;;
+        cab)        extract_cab "$ARCHIVE" "$DEST" ;;
+        ace)        unace x -p "$DEST/" "$ARCHIVE" ;;
+        # packages
+        deb)        dpkg-deb -x "$ARCHIVE" "$DEST" ;;
+        rpm)        rpm2cpio "$ARCHIVE" | cpio -idm -D "$DEST" ;;
+        cpio)       cpio -idm -D "$DEST" < "$ARCHIVE" ;;
+        ar)         ar x "$ARCHIVE" --output="$DEST" ;;
+        # installers
+        exe)        innoextract -d "$DEST" "$ARCHIVE" ;;
+        # comic books
+        cbt)        tar -xf "$ARCHIVE" -C "$DEST" ;;
+    esac
+}
+
+# List archive contents
+cmd_list() {
+    local ARCHIVE="$1"
+    local TYPE
+    TYPE=$(detect_type "$ARCHIVE")
+
+    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+
+    case "$TYPE" in
+        # tar variants
+        tar)        tar -tf "$ARCHIVE" ;;
+        tar.gz)     tar -tzf "$ARCHIVE" ;;
+        tar.bz2)    tar -tjf "$ARCHIVE" ;;
+        tar.xz)     tar -tJf "$ARCHIVE" ;;
+        tar.zst)    tar --zstd -tf "$ARCHIVE" ;;
+        tar.lz4)    lz4 -dc "$ARCHIVE" | tar -tf - ;;
+        tar.lzma)   tar --lzma -tf "$ARCHIVE" ;;
+        tar.lz)     tar --lzip -tf "$ARCHIVE" ;;
+        tar.br)     brotli -dc "$ARCHIVE" | tar -tf - ;;
+        tar.sz)     snunzip -c "$ARCHIVE" | tar -tf - ;;
+        tar.bz3)    bzip3 -dc "$ARCHIVE" | tar -tf - ;;
+        # single file
+        gz|bz2|xz|zst|lz4|lzma|lz|br|sz|bz3)
+                    echo "(single file compressed)" ;;
+        # archives
+        zip|cbz)    unzip -l "$ARCHIVE" ;;
+        7z|cb7)     7z l "$ARCHIVE" ;;
+        rar|cbr)    unrar l "$ARCHIVE" ;;
+        lzh)        lha l "$ARCHIVE" ;;
+        cab)        cabextract -l "$ARCHIVE" ;;
+        ace)        unace l "$ARCHIVE" ;;
+        # packages
+        deb)        dpkg-deb -c "$ARCHIVE" ;;
+        rpm)        rpm -qlp "$ARCHIVE" ;;
+        cpio)       cpio -t < "$ARCHIVE" ;;
+        ar)         ar t "$ARCHIVE" ;;
+        # installers
+        exe)        innoextract -l "$ARCHIVE" ;;
+        # comic books
+        cbt)        tar -tf "$ARCHIVE" ;;
+    esac
+}
+
+# Create archive
+cmd_create() {
+    local ARCHIVE="$1"
+    shift
+    local TYPE
+    TYPE=$(detect_type "$ARCHIVE")
+
+    [[ $# -gt 0 ]] || die "No files specified"
+
+    case "$TYPE" in
+        # tar variants
+        tar)        tar -cf "$ARCHIVE" "$@" ;;
+        tar.gz)     tar -czf "$ARCHIVE" "$@" ;;
+        tar.bz2)    tar -cjf "$ARCHIVE" "$@" ;;
+        tar.xz)     tar -cJf "$ARCHIVE" "$@" ;;
+        tar.zst)    tar --zstd -cf "$ARCHIVE" "$@" ;;
+        tar.lz4)    tar -cf - "$@" | lz4 > "$ARCHIVE" ;;
+        tar.lzma)   tar --lzma -cf "$ARCHIVE" "$@" ;;
+        tar.lz)     tar --lzip -cf "$ARCHIVE" "$@" ;;
+        tar.br)     tar -cf - "$@" | brotli > "$ARCHIVE" ;;
+        tar.sz)     tar -cf - "$@" | snzip > "$ARCHIVE" ;;
+        tar.bz3)    tar -cf - "$@" | bzip3 > "$ARCHIVE" ;;
+        # single file compression
+        gz)         [[ $# -eq 1 ]] || die "gz: single file only"; gzip -c "$1" > "$ARCHIVE" ;;
+        bz2)        [[ $# -eq 1 ]] || die "bz2: single file only"; bzip2 -c "$1" > "$ARCHIVE" ;;
+        xz)         [[ $# -eq 1 ]] || die "xz: single file only"; xz -c "$1" > "$ARCHIVE" ;;
+        zst)        [[ $# -eq 1 ]] || die "zst: single file only"; zstd -c "$1" > "$ARCHIVE" ;;
+        lz4)        [[ $# -eq 1 ]] || die "lz4: single file only"; lz4 "$1" "$ARCHIVE" ;;
+        lzma)       [[ $# -eq 1 ]] || die "lzma: single file only"; lzma -c "$1" > "$ARCHIVE" ;;
+        lz)         [[ $# -eq 1 ]] || die "lz: single file only"; lzip -c "$1" > "$ARCHIVE" ;;
+        br)         [[ $# -eq 1 ]] || die "br: single file only"; brotli -c "$1" > "$ARCHIVE" ;;
+        sz)         [[ $# -eq 1 ]] || die "sz: single file only"; snzip -c "$1" > "$ARCHIVE" ;;
+        bz3)        [[ $# -eq 1 ]] || die "bz3: single file only"; bzip3 -c "$1" > "$ARCHIVE" ;;
+        # archives
+        zip|cbz)    zip -r "$ARCHIVE" "$@" ;;
+        7z|cb7)     7z a "$ARCHIVE" "$@" ;;
+        rar|cbr)    rar a "$ARCHIVE" "$@" ;;
+        lzh)        lha c "$ARCHIVE" "$@" ;;
+        # comic tar
+        cbt)        tar -cf "$ARCHIVE" "$@" ;;
+        *)          die "Cannot create $TYPE archives" ;;
+    esac
+}
+
+# Test archive integrity
+cmd_test() {
+    local ARCHIVE="$1"
+    local TYPE
+    TYPE=$(detect_type "$ARCHIVE")
+
+    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+
+    case "$TYPE" in
+        # tar variants
+        tar)        tar -tf "$ARCHIVE" > /dev/null ;;
+        tar.gz)     tar -tzf "$ARCHIVE" > /dev/null ;;
+        tar.bz2)    tar -tjf "$ARCHIVE" > /dev/null ;;
+        tar.xz)     tar -tJf "$ARCHIVE" > /dev/null ;;
+        tar.zst)    tar --zstd -tf "$ARCHIVE" > /dev/null ;;
+        tar.lz4)    lz4 -t "$ARCHIVE" ;;
+        tar.lzma)   tar --lzma -tf "$ARCHIVE" > /dev/null ;;
+        tar.lz)     tar --lzip -tf "$ARCHIVE" > /dev/null ;;
+        tar.br)     brotli -t "$ARCHIVE" ;;
+        tar.sz)     snunzip -t "$ARCHIVE" ;;
+        tar.bz3)    bzip3 -t "$ARCHIVE" ;;
+        # single file compression
+        gz)         gzip -t "$ARCHIVE" ;;
+        bz2)        bzip2 -t "$ARCHIVE" ;;
+        xz)         xz -t "$ARCHIVE" ;;
+        zst)        zstd -t "$ARCHIVE" ;;
+        lz4)        lz4 -t "$ARCHIVE" ;;
+        lzma)       lzma -t "$ARCHIVE" ;;
+        lz)         lzip -t "$ARCHIVE" ;;
+        br)         brotli -t "$ARCHIVE" ;;
+        sz)         snunzip -t "$ARCHIVE" ;;
+        bz3)        bzip3 -t "$ARCHIVE" ;;
+        # archives
+        zip|cbz)    unzip -t "$ARCHIVE" ;;
+        7z|cb7)     7z t "$ARCHIVE" ;;
+        rar|cbr)    unrar t "$ARCHIVE" ;;
+        lzh)        lha t "$ARCHIVE" ;;
+        cab)        cabextract -t "$ARCHIVE" ;;
+        ace)        unace t "$ARCHIVE" ;;
+        # installers
+        exe)        innoextract -t "$ARCHIVE" ;;
+        # comic tar
+        cbt)        tar -tf "$ARCHIVE" > /dev/null ;;
+        *)          die "Cannot test $TYPE archives" ;;
+    esac
+    echo "OK"
+}
+
+# Usage
+usage() {
+    cat << 'EOF'
+Usage: arc COMMAND ARCHIVE [ARGS...]
+
+Commands:
+  x, extract   Extract archive (optional: destination dir)
+  l, list      List archive contents
+  c, create    Create archive from files
+  t, test      Test archive integrity
+
+Formats:
+  tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, tar.lzma, tar.lz, tar.br
+  gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3
+  zip, 7z, rar, lzh, cab, ace
+  deb, rpm, cpio, ar
+  exe (Inno Setup), cab (InstallShield)
+  cbz, cbr, cb7, cbt (comic books)
+
+Examples:
+  arc x foo.tar.xz           Extract (auto-creates subdir if needed)
+  arc x foo.tar.xz ./out     Extract to ./out
+  arc l foo.zip              List contents
+  arc c bar.tar.zst dir/     Create tar.zst archive
+  arc t foo.7z               Test integrity
+EOF
+    exit 1
+}
+
+# Main
+[[ $# -ge 1 ]] || usage
+
+CMD="$1"
+shift
+
+case "$CMD" in
+    x|extract)  [[ $# -ge 1 ]] || usage; cmd_extract "$@" ;;
+    l|list)     [[ $# -eq 1 ]] || usage; cmd_list "$1" ;;
+    c|create)   [[ $# -ge 2 ]] || usage; cmd_create "$@" ;;
+    t|test)     [[ $# -eq 1 ]] || usage; cmd_test "$1" ;;
+    *)          usage ;;
+esac
