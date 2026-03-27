@@ -11,7 +11,10 @@
 #
 # Examples:
 #   path-shorten-bash /home/luthor/bin/bad/parse_number.h
+#   -> /h/l/bin/bad/parse_number.h
+#
 #   echo /home/luthor/bin/bad/parse_number.h | path-shorten-bash
+#   -> /h/l/bin/bad/parse_number.h
 
 die() {
     printf 'path-shorten-bash: %s\n' "$1" >&2

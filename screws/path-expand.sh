@@ -10,8 +10,11 @@
 #   echo PATH | path-expand-bash
 #
 # Examples:
-#   path-expand-bash /h/i/bin/path-expand.sh
-#   echo /h/i/bin/path-expand.sh | path-expand-bash
+#   path-expand-bash /h/l/bin/bad/parse_number.h
+#   -> /home/luthor/bin/bad/parse_number.h
+#
+#   echo /h/l/bin/bad/parse_number.h | path-expand-bash
+#   -> /home/luthor/bin/bad/parse_number.h
 
 die() {
     printf 'path-expand-bash: %s\n' "$1" >&2
