@@ -1,0 +1,18 @@
+#!/bin/bash
+# echofile - Create files named after their content
+#
+# Create files where each filename equals its content.
+# Useful for quick test setups.
+#
+# Usage:
+#   echofile NAME...
+#
+# Example:
+#   echofile a b c    # creates files a, b, c containing "a", "b", "c"
+
+[[ $# -eq 0 ]] && { echo "usage: echofile NAME..." >&2; exit 1; }
+
+for F in "$@"; do
+    echo "echo $F > $F"
+    echo "$F" > "$F"
+done
