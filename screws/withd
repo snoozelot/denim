@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# withd - Execute Command in Directory with Status Output
+#
+# Run a command in a specified directory, capture output, and display
+# colored exit status. Useful for parallel batch operations.
+#
+# Usage:
+#   withd [OPTIONS] DIRECTORY COMMAND [ARGS...]
+#
+# Presets (shorthand, can combine with fine-tuning):
+#   -q, --quiet       Status only
+#                       --status=yes --stdout=no --stderr=no
+#   -v, --verbose     Status + labeled stdout/stderr
+#                       --status=yes --stdout=labeled --stderr=labeled
+#   -r, --raw         No status, plain stdout/stderr
+#                       --status=no --stdout=plain --stderr=plain
+#
+# Default:            Quiet unless failure
+#                       --status=yes --stdout=fail --stderr=fail
+#
+# Fine-tuning:
+#   --status=yes|no|fail            Exit status line
+#   --stdout=labeled|plain|fail|no  Stdout handling
+#   --stderr=labeled|plain|fail|no  Stderr handling
+#
+# Modes:
+#   labeled  Always show, with labels    e.g. "/tmp [stdout] hello"
+#   fail     Like labeled, on failure only
+#   plain    Always show, no labels      e.g. "hello"
+#   no       Suppress entirely
+#
+# Other:
+#   -n, --dry-run     Show what would run without executing
+#   --no-color        Disable colors (auto if not tty)
+#   --timestamped     Add timestamps to labels
+#   -h, --help        Show this help
+#
+# Examples:
+#   withd /tmp pwd
+#   withd /tmp 'ls | wc'
+#   withd -n /tmp 'rm -rf *'
+#   ls -d ./repos-*/ | xargs -P16 -I{} withd -q {} git pull
+#
+set -eu
+
+# --- Configuration ---
+
+DIR=""
+CMD=""
+CMD_ARGS=()
+DRY_RUN=false
+NO_COLOR=false
+STATUS=yes
+STDOUT=fail
+STDERR=fail
+TS_OUT="\${DIR} [stdout]"
+TS_ERR="\${DIR} [stderr]"
+
+# --- Colors ---
+
+R=$'\033[0m'
+RED=$'\033[1;31m'
+GREEN=$'\033[1;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[1;36m'
+
+# --- Predicates ---
+
+colors_on()      { [[ "$NO_COLOR" == false && -t 1 ]]; }
+is_dry_run()     { [[ "$DRY_RUN" == true ]]; }
+is_success()     { [[ $EXIT -eq 0 ]]; }
+is_failure()     { [[ $EXIT -ne 0 ]]; }
+has_output()     { [[ -s "$1" ]]; }
+mode_labeled()   { [[ "$1" == "labeled" ]]; }
+mode_fail()      { [[ "$1" == "fail" ]]; }
+mode_plain()     { [[ "$1" == "plain" ]]; }
+mode_no()        { [[ "$1" == "no" ]]; }
+valid_status()   { [[ "$1" =~ ^(yes|no|fail)$ ]]; }
+valid_output()   { [[ "$1" =~ ^(labeled|plain|fail|no)$ ]]; }
+no_dir()         { [[ -z "$DIR" ]]; }
+no_cmd()         { [[ -z "$CMD" ]]; }
+dir_missing()    { [[ ! -d "$DIR" ]]; }
+
+# --- Operations ---
+
+die() { echo "[ERROR] $1" >&2; exit 1; }
+
+usage() { sed -n '2,/^[^#]/{ s/^# \?//p }' "$0"; exit 0; }
+
+colorize() {
+    colors_on || { cat; return; }
+    sed -e "s/\\[DRY-RUN\\]/${CYAN}[DRY-RUN]${R}/g" \
+        -e "s/\\[SUCCESS\\]/${GREEN}[SUCCESS]${R}/g" \
+        -e "s/\\[FAILURE\\/\\([^]]*\\)\\]/${RED}[FAILURE\\/\\1]${R}/g" \
+        -e "s/\\[stdout\\]/${YELLOW}[stdout]${R}/g" \
+        -e "s/\\[stderr\\]/${RED}[stderr]${R}/g"
+}
+
+print_status() {
+    mode_no "$STATUS" && return
+    mode_fail "$STATUS" && is_success && return
+    is_success && echo "[SUCCESS] ${CMD}   # ${DIR}"
+    is_failure && echo "[FAILURE/${EXIT}] ${CMD}   # ${DIR}"
+}
+
+print_dry_run() {
+    echo "[DRY-RUN] ${CMD}   # ${DIR}"
+}
+
+print_output() {
+    local MODE=$1 FILE=$2 FMT=$3
+    mode_no "$MODE" && return
+    has_output "$FILE" || return
+    mode_plain "$MODE" && { cat "$FILE"; return; }
+    mode_labeled "$MODE" && { eval "ts \"$FMT\"" < "$FILE"; return; }
+    mode_fail "$MODE" && is_failure && eval "ts \"$FMT\"" < "$FILE"
+}
+
+needs_shell() {
+    [[ "$CMD" == *'|'* || "$CMD" == *'>'* || "$CMD" == *'<'* || \
+       "$CMD" == *'&'* || "$CMD" == *';'* || "$CMD" == *'$'* || \
+       "$CMD" == *'`'* || "$CMD" == *'('* || "$CMD" == *')'* || \
+       "$CMD" == *'*'* || "$CMD" == *'?'* ]]
+}
+
+run_command() {
+    EXIT=0
+    if needs_shell; then
+        (cd "$DIR" && eval "$CMD" > "$TMPDIR/out" 2> "$TMPDIR/err") || EXIT=$?
+    else
+        (cd "$DIR" && "${CMD_ARGS[@]}" > "$TMPDIR/out" 2> "$TMPDIR/err") || EXIT=$?
+    fi
+}
+
+cleanup() { rm -rf "$TMPDIR"; }
+
+parse_value() { echo "${1#*=}"; }
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)     usage ;;
+            -n|--dry-run)  DRY_RUN=true; shift ;;
+            --no-color)    NO_COLOR=true; shift ;;
+            --timestamped) TS_OUT="%M:%.S \${DIR} [stdout]"
+                           TS_ERR="%M:%.S \${DIR} [stderr]"; shift ;;
+            -q|--quiet)    STATUS=yes; STDOUT=no; STDERR=no; shift ;;
+            -v|--verbose)  STATUS=yes; STDOUT=labeled; STDERR=labeled; shift ;;
+            -r|--raw)      STATUS=no; STDOUT=plain; STDERR=plain; shift ;;
+            --status=*)
+                V=$(parse_value "$1")
+                valid_status "$V" || die "Invalid --status value: $V"
+                STATUS=$V; shift ;;
+            --stdout=*)
+                V=$(parse_value "$1")
+                valid_output "$V" || die "Invalid --stdout value: $V"
+                STDOUT=$V; shift ;;
+            --stderr=*)
+                V=$(parse_value "$1")
+                valid_output "$V" || die "Invalid --stderr value: $V"
+                STDERR=$V; shift ;;
+            -*)            die "Unknown option: $1" ;;
+            *)             DIR=$1; shift; CMD_ARGS=("$@"); CMD="$*"; break ;;
+        esac
+    done
+}
+
+validate_args() {
+    no_dir && die "Directory required"
+    no_cmd && die "Command required"
+    is_dry_run && return 0
+    dir_missing && die "Directory not found: $DIR"
+    return 0
+}
+
+# --- Main ---
+
+parse_args "$@"
+validate_args
+
+is_dry_run && { print_dry_run | colorize; exit 0; }
+
+TMPDIR=$(mktemp -d)
+trap cleanup EXIT
+
+run_command
+print_status | colorize
+print_output "$STDOUT" "$TMPDIR/out" "$TS_OUT" | colorize
+print_output "$STDERR" "$TMPDIR/err" "$TS_ERR" | colorize >&2
+
+exit $EXIT
