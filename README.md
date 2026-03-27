@@ -1,4 +1,4 @@
-# bin-denim
+# denim
 
 Unix shell utilities. Two categories:
 
