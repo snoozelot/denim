@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# memento-mori-cal - Visualize your life in weeks
+#
+# Generate an ASCII calendar showing your entire expected lifespan as a grid
+# of weeks. Each row represents a year, each symbol a week of 7 days since
+# birth. Orphan days (years don't divide evenly into weeks) accumulate until
+# they form complete weeks, displayed in the "53rd week" column.
+#
+# Usage:
+#   ./memento-mori-cal YYYY-MM-DD LIFESPAN [PAST] [CURRENT] [FUTURE]
+#   ./memento-mori-cal --birthdate YYYY-MM-DD --lifespan YEARS [--past-symbol X]
+#
+# Examples:
+#   ./memento-mori-cal 1990-01-01 80
+#   ./memento-mori-cal 1990-01-01 90 '#' '.' '_'
+
+# --- Constants ---
+readonly SECS_DAY=86400
+readonly SECS_WEEK=$((7 * SECS_DAY))
+readonly WEEKS_GROUP=13
+readonly WEEKS_ROW=52
+readonly LABEL_INTERVAL=5
+
+# --- State ---
+BIRTHDATE=""
+LIFESPAN=""
+PAST_CH="X"
+CURR_CH="."
+FUTURE_CH="."
+
+BIRTH_SECS=0
+END_SECS=0
+NOW_SECS=0
+TOTAL_WEEKS=0
+BIRTH_YEAR=0
+FIRST_YEAR_SECS=0
+
+YEAR=0
+LIFE_WEEK=0
+ORPHAN_DAYS=0
+
+# --- Utilities ---
+die() { echo "$1" >&2; exit 1; }
+
+# --- Predicates ---
+is_label_year() { [[ $(($1 % LABEL_INTERVAL)) -eq 0 ]]; }
+is_birth_year() { [[ $YEAR -eq 0 ]]; }
+life_over()     { [[ $LIFE_WEEK -ge $TOTAL_WEEKS ]]; }
+is_group_sep()  { [[ $(($1 + 1)) -lt $WEEKS_ROW && $((($1 + 1) % WEEKS_GROUP)) -eq 0 ]]; }
+before_birth()  { [[ $YEAR -eq 0 && $1 -lt $WEEKS_BEFORE ]]; }
+
+missing_required_args() { [[ -z "$BIRTHDATE" || -z "$LIFESPAN" ]]; }
+is_positive_int()       { [[ $1 =~ ^[0-9]+$ && $1 -gt 0 ]]; }
+birthdate_in_future()   { [[ $BIRTH_SECS -gt $NOW_SECS ]]; }
+
+# --- Week symbol (no subshells) ---
+CURRENT_WEEK=0
+
+is_past()    { [[ $LIFE_WEEK -lt $CURRENT_WEEK ]]; }
+is_current() { [[ $LIFE_WEEK -eq $CURRENT_WEEK ]]; }
+
+print_week_ch() {
+    if is_past; then
+        printf "%s" "$PAST_CH"
+    elif is_current; then
+        printf "%s" "$CURR_CH"
+    else
+        printf "%s" "$FUTURE_CH"
+    fi
+}
+
+emit_week() { print_week_ch; ((LIFE_WEEK++)); }
+
+# --- Argument parsing ---
+print_usage() {
+    echo "Usage: $0 YYYY-MM-DD LIFESPAN [PAST] [CURR] [FUTURE]"
+}
+
+parse_flags() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --birthdate)     BIRTHDATE="$2"; shift 2 ;;
+            --lifespan)      LIFESPAN="$2"; shift 2 ;;
+            --past-symbol)   PAST_CH="$2"; shift 2 ;;
+            --current-symbol) CURR_CH="$2"; shift 2 ;;
+            --future-symbol) FUTURE_CH="$2"; shift 2 ;;
+            --help|-h)       print_usage; exit 0 ;;
+            --)              shift; break ;;
+            --*)             die "Unknown option: $1" ;;
+            *)               break ;;
+        esac
+    done
+    POSITIONAL=("$@")
+}
+
+parse_positional() {
+    [[ ${#POSITIONAL[@]} -ge 1 ]] && BIRTHDATE="${POSITIONAL[0]}"
+    [[ ${#POSITIONAL[@]} -ge 2 ]] && LIFESPAN="${POSITIONAL[1]}"
+    [[ ${#POSITIONAL[@]} -ge 3 ]] && PAST_CH="${POSITIONAL[2]}"
+    [[ ${#POSITIONAL[@]} -ge 4 ]] && CURR_CH="${POSITIONAL[3]}"
+    [[ ${#POSITIONAL[@]} -ge 5 ]] && FUTURE_CH="${POSITIONAL[4]}"
+}
+
+validate_args() {
+    missing_required_args && { print_usage >&2; exit 1; }
+    is_positive_int "$LIFESPAN" || die "LIFESPAN must be positive integer"
+}
+
+parse_args() {
+    parse_flags "$@"
+    parse_positional
+    validate_args
+}
+
+# --- Date calculations ---
+compute_dates() {
+    BIRTH_SECS=$(date -d "$BIRTHDATE" +%s 2>/dev/null) || die "Invalid birthdate format"
+    NOW_SECS=$(date +%s)
+    birthdate_in_future && die "Birthdate cannot be in the future"
+    END_SECS=$(date -d "$BIRTHDATE +$LIFESPAN years" +%s 2>/dev/null) || die "Invalid lifespan"
+    TOTAL_WEEKS=$(((END_SECS - BIRTH_SECS) / SECS_WEEK))
+    CURRENT_WEEK=$(((NOW_SECS - BIRTH_SECS) / SECS_WEEK))
+    BIRTH_YEAR=$(date -d "$BIRTHDATE" +%Y)
+    local NEXT_YEAR_SECS
+    NEXT_YEAR_SECS=$(date -d "$((BIRTH_YEAR + 1))-01-01" +%s)
+    FIRST_YEAR_SECS=$((NEXT_YEAR_SECS - BIRTH_SECS))
+}
+
+# --- Calendar year calculations (computed once per year) ---
+ABS_YEAR=0
+CAL_YEAR_SECS=0
+YEAR_TOTAL_SECS=0
+YEAR_WEEKS=0
+WEEKS_BEFORE=0
+
+is_leap() { [[ $(($1 % 4)) -eq 0 && ($(($1 % 100)) -ne 0 || $(($1 % 400)) -eq 0) ]]; }
+
+compute_year_values() {
+    ABS_YEAR=$((BIRTH_YEAR + YEAR))
+    if is_birth_year; then
+        CAL_YEAR_SECS=$FIRST_YEAR_SECS
+        WEEKS_BEFORE=$((WEEKS_ROW - FIRST_YEAR_SECS / SECS_WEEK))
+    elif is_leap "$ABS_YEAR"; then
+        CAL_YEAR_SECS=$((366 * SECS_DAY))
+        WEEKS_BEFORE=0
+    else
+        CAL_YEAR_SECS=$((365 * SECS_DAY))
+        WEEKS_BEFORE=0
+    fi
+    YEAR_TOTAL_SECS=$((CAL_YEAR_SECS + ORPHAN_DAYS * SECS_DAY))
+    YEAR_WEEKS=$((YEAR_TOTAL_SECS / SECS_WEEK))
+}
+
+has_53rd_week() {
+    is_birth_year && return 1
+    life_over && return 1
+    [[ $YEAR_WEEKS -gt $WEEKS_ROW ]]
+}
+
+# --- Printing ---
+print_year_label() {
+    if is_label_year "$ABS_YEAR"; then
+        printf "%4d " "$ABS_YEAR"
+    else
+        printf "     "
+    fi
+}
+
+print_life_year() {
+    if is_label_year "$YEAR"; then
+        printf " %2d" "$YEAR"
+    fi
+}
+
+print_53rd_week() {
+    if has_53rd_week; then
+        emit_week
+    else
+        printf " "
+    fi
+    printf " "
+}
+
+print_week_row() {
+    local I
+
+    for ((I = 0; I < WEEKS_ROW; I++)); do
+        if before_birth "$I" || life_over; then
+            printf " "
+        else
+            emit_week
+        fi
+        is_group_sep "$I" && printf " "
+    done
+}
+
+update_orphans() { ORPHAN_DAYS=$((YEAR_TOTAL_SECS % SECS_WEEK / SECS_DAY)); }
+year_gap()       { is_label_year $((YEAR + 1)); }
+
+next_year() {
+    update_orphans
+    YEAR=$((YEAR + 1))
+}
+
+print_year() {
+    compute_year_values
+    print_year_label
+    print_53rd_week
+    print_week_row
+    print_life_year
+    echo
+    year_gap && echo
+    next_year
+}
+
+# --- Header and footer ---
+print_header() {
+    echo
+    printf "       Memento Mori Countdown Calendar, your Life in Weeks\n"
+    echo
+}
+
+weeks_lived() {
+    local W=$(((NOW_SECS - BIRTH_SECS) / SECS_WEEK))
+    [[ $W -gt $TOTAL_WEEKS ]] && W=$TOTAL_WEEKS
+    echo "$W"
+}
+
+percent_lived() { echo $(($(weeks_lived) * 100 / TOTAL_WEEKS)); }
+death_year() { date -d "@$END_SECS" +%Y; }
+
+print_footer() {
+    echo
+    printf "       Born %s, live %s years, die %s, weeks %d/%d\n" \
+        "$BIRTHDATE" "$LIFESPAN" "$(death_year)" "$(weeks_lived)" "$TOTAL_WEEKS"
+    printf "       %02d%%\n" "$(percent_lived)"
+}
+
+# --- Main ---
+reset_calendar() {
+    YEAR=0
+    LIFE_WEEK=0
+    ORPHAN_DAYS=0
+}
+
+calendar() {
+    reset_calendar
+    while ! life_over; do
+        print_year
+    done
+}
+
+main() {
+    parse_args "$@"
+    compute_dates
+    print_header
+    calendar
+    print_footer
+}
+
+main "$@"
