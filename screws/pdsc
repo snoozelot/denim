@@ -1,0 +1,101 @@
+#!/bin/bash
+# pdsc - Process Descendants
+#
+# List all descendant PIDs of a process.
+#
+# Usage:
+#   pdsc [-v] [-b|-d] PID
+#
+# Options:
+#   -v    verbose: show pid, user, start time, command (one process per line)
+#   -b    breadth-first: group by generation/depth
+#   -d    depth-first: group by subtree (default)
+#
+# Example:
+#   pdsc $$           # descendants of current shell
+#   pdsc -v 1         # descendants of init with details
+#   pdsc -b -v 1      # descendants grouped by generation
+#
+# Reference:
+#   https://unix.stackexchange.com/questions/124127/kill-all-descendant-processes
+
+pid_exists()  { ps -o pid= --pid "$1" >/dev/null 2>&1; }
+children_of() { ps -o pid= --ppid "$1"; }
+is_verbose()  { [[ -n "$VERBOSE" ]]; }
+got()         { [[ -n $1 ]]; }
+
+show_pid() {
+    local PID=$1
+    if is_verbose; then
+        ps -o pid=,user=,lstart=,args= --pid "$PID"
+    else
+        echo "$PID"
+    fi
+}
+
+show_pids() {
+    local PIDS=$*
+    if is_verbose; then
+        ps -o pid=,user=,lstart=,args= --pid "$PIDS"
+    else
+        echo "$PIDS"
+    fi
+}
+
+# depth-first: collect entire subtree rooted at PID (no separators)
+collect_subtree() {
+    local PID=$1
+    show_pid "$PID"
+    for CHILD in $(children_of "$PID"); do
+        collect_subtree "$CHILD"
+    done
+}
+
+separator() { is_verbose && echo; }
+
+breadth_first() {
+    local ROOT=$1
+    pid_exists "$ROOT" && show_pids "$ROOT"
+
+    local CURRENT=("$ROOT")
+    while [[ ${#CURRENT[@]} -gt 0 ]]; do
+        local NEXT=()
+        for PID in "${CURRENT[@]}"; do
+            NEXT+=($(children_of "$PID"))
+        done
+        [[ ${#NEXT[@]} -gt 0 ]] && {
+            separator
+            show_pids "${NEXT[@]}"
+        }
+        CURRENT=("${NEXT[@]}")
+    done
+}
+
+depth_first() {
+    local ROOT=$1
+    pid_exists "$ROOT" || return
+    show_pid "$ROOT"
+
+    local FIRST=1
+    for CHILD in $(children_of "$ROOT"); do
+        [[ $FIRST -eq 1 ]] || separator
+        FIRST=0
+        collect_subtree "$CHILD"
+    done
+}
+
+VERBOSE=
+TRAVERSE_FN=depth_first
+while [[ "$1" == -* ]]; do
+    case "$1" in
+        -v) VERBOSE=1 ;;
+        -b) TRAVERSE_FN=breadth_first ;;
+        -d) TRAVERSE_FN=depth_first ;;
+    esac
+    shift
+done
+
+PID=$1
+got "$PID" || exit 0
+
+${TRAVERSE_FN} "${PID}"

@@ -1,0 +1,6 @@
+#!/bin/bash
+# slay - Kill processes with SIGKILL
+#
+# Usage: slay PID...
+
+exec kill -SIGKILL "$@"
