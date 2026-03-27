@@ -1,0 +1,176 @@
+#!/bin/bash
+# spell-number-ru - convert integer to Russian words
+#
+# usage: spell-number-ru <number>
+#
+# Supports integers from 0 to 10^66-1
+# Negative numbers supported with "МИНУС" prefix
+#
+# Russian number rules:
+# - 40 = сорок (irregular), 90 = девяносто (irregular)
+# - 100 = сто, 200 = двести, 300 = триста, 400 = четыреста
+# - тысяча/миллион etc. require grammatical agreement (1/2-4/5+)
+
+set -euo pipefail
+
+# --- Utilities ---
+
+die()               { echo "$1" >&2; exit 1; }
+has_single_argument() { [[ $# -eq 1 ]]; }
+is_integer()        { [[ $1 =~ ^-?[0-9]+$ ]]; }
+
+# --- Data ---
+
+ONES=(
+    ноль
+    один
+    два
+    три
+    четыре
+    пять
+    шесть
+    семь
+    восемь
+    девять
+    десять
+    одиннадцать
+    двенадцать
+    тринадцать
+    четырнадцать
+    пятнадцать
+    шестнадцать
+    семнадцать
+    восемнадцать
+    девятнадцать
+)
+# feminine forms for тысяча
+ONES_F=(
+    ""
+    одна
+    две
+)
+TENS=(
+    ''
+    ''
+    двадцать
+    тридцать
+    сорок
+    пятьдесят
+    шестьдесят
+    семьдесят
+    восемьдесят
+    девяносто
+)
+HUNDREDS=(
+    ''
+    сто
+    двести
+    триста
+    четыреста
+    пятьсот
+    шестьсот
+    семьсот
+    восемьсот
+    девятьсот
+)
+# Scale words: singular, 2-4, 5+
+# тысяча (f), миллион (m), миллиард (m), etc.
+SCALE_1=( '' тысяча миллион миллиард триллион квадриллион квинтиллион секстиллион септиллион октиллион нониллион дециллион )
+SCALE_2=( '' тысячи миллиона миллиарда триллиона квадриллиона квинтиллиона секстиллиона септиллиона октиллиона нониллиона дециллиона )
+SCALE_5=( '' тысяч миллионов миллиардов триллионов квадриллионов квинтиллионов секстиллионов септиллионов октиллионов нониллионов дециллионов )
+# Gender: 1=тысяча is feminine, rest masculine
+SCALE_GENDER=( m f m m m m m m m m m m )
+
+spell_under_1000() {
+    local N=$1 GENDER=$2 OUT="" W
+    if [[ $N -ge 100 ]]; then
+        OUT="${HUNDREDS[$((N / 100))]^^}"
+        N=$((N % 100))
+        [[ $N -gt 0 ]] && OUT="$OUT "
+    fi
+    if [[ $N -ge 20 ]]; then
+        W="${TENS[$((N / 10))]}"
+        OUT="$OUT${W^^}"
+        N=$((N % 10))
+        [[ $N -gt 0 ]] && OUT="$OUT "
+    fi
+    if [[ $N -gt 0 && $N -lt 20 ]]; then
+        # Use feminine forms for 1, 2 when needed
+        if [[ $GENDER == "f" && $N -le 2 ]]; then
+            W="${ONES_F[$N]}"
+        else
+            W="${ONES[$N]}"
+        fi
+        OUT="$OUT${W^^}"
+    fi
+    echo "$OUT"
+}
+
+get_scale_word() {
+    local N=$1 IDX=$2
+    local LAST2=$((N % 100))
+    local LAST1=$((N % 10))
+    # 11-14 always use 5+ form
+    if [[ $LAST2 -ge 11 && $LAST2 -le 14 ]]; then
+        echo "${SCALE_5[$IDX]}"
+    elif [[ $LAST1 -eq 1 ]]; then
+        echo "${SCALE_1[$IDX]}"
+    elif [[ $LAST1 -ge 2 && $LAST1 -le 4 ]]; then
+        echo "${SCALE_2[$IDX]}"
+    else
+        echo "${SCALE_5[$IDX]}"
+    fi
+}
+
+spell() {
+    local N=$1
+    [[ $N == "0" ]] && { echo "НОЛЬ"; return; }
+
+    local NEG=""
+    if [[ $N == -* ]]; then
+        NEG="МИНУС "
+        N="${N#-}"
+    fi
+
+    N="${N#"${N%%[!0]*}"}"
+    [[ -z $N ]] && { echo "НОЛЬ"; return; }
+
+    while [[ $((${#N} % 3)) -ne 0 ]]; do
+        N="0$N"
+    done
+
+    local CHUNKS=()
+    while [[ -n $N ]]; do
+        CHUNKS+=("${N:0:3}")
+        N="${N:3}"
+    done
+
+    local OUT="" NCHUNKS=${#CHUNKS[@]}
+    if [[ $NCHUNKS -gt ${#SCALE_1[@]} ]]; then
+        echo "error: number too large" >&2
+        return 1
+    fi
+
+    for I in "${!CHUNKS[@]}"; do
+        local CHUNK=${CHUNKS[$I]}
+        CHUNK=$((10#$CHUNK))
+        if [[ $CHUNK -gt 0 ]]; then
+            local SCALE_IDX=$((NCHUNKS - I - 1))
+            local GENDER="${SCALE_GENDER[$SCALE_IDX]}"
+            local PART
+            PART=$(spell_under_1000 "$CHUNK" "$GENDER")
+            if [[ $SCALE_IDX -gt 0 ]]; then
+                local SCALE_WORD
+                SCALE_WORD=$(get_scale_word "$CHUNK" "$SCALE_IDX")
+                PART="$PART $SCALE_WORD"
+            fi
+            OUT="${OUT:+$OUT  }$PART"
+        fi
+    done
+    echo "$NEG$OUT"
+}
+
+has_single_argument "$@" || die "usage: spell-number-ru <integer>"
+is_integer "$1" || die "error: not an integer: $1"
+
+spell "$1"

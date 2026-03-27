@@ -1,0 +1,150 @@
+#!/bin/bash
+# spell-number - convert integer to English words
+#
+# usage: spell-number <number>
+#
+# Supports integers from 0 to 10^66-1 (vigintillion)
+# Negative numbers supported with "negative" prefix
+
+set -euo pipefail
+
+# --- Utilities ---
+
+die()               { echo "$1" >&2; exit 1; }
+has_single_argument() { [[ $# -eq 1 ]]; }
+is_integer()        { [[ $1 =~ ^-?[0-9]+$ ]]; }
+
+# --- Data ---
+
+ONES=(
+    zero
+    one
+    two
+    three
+    four
+    five
+    six
+    seven
+    eight
+    nine
+    ten
+    eleven
+    twelve
+    thirteen
+    fourteen
+    fifteen
+    sixteen
+    seventeen
+    eighteen
+    nineteen
+)
+TENS=(
+    ''
+    ''
+    twenty
+    thirty
+    forty
+    fifty
+    sixty
+    seventy
+    eighty
+    ninety
+)
+SCALE=(
+    ''
+    thousand
+    million
+    billion
+    trillion
+    quadrillion
+    quintillion
+    sextillion
+    septillion
+    octillion
+    nonillion
+    decillion
+    undecillion
+    duodecillion
+    tredecillion
+    quattuordecillion
+    quindecillion
+    sexdecillion
+    septendecillion
+    octodecillion
+    novemdecillion
+    vigintillion
+)
+
+spell_under_1000() {
+    local N=$1 OUT="" W
+    if [[ $N -ge 100 ]]; then
+        W="${ONES[$((N / 100))]}"
+        OUT="${W^^} hundred"
+        N=$((N % 100))
+        [[ $N -gt 0 ]] && OUT="$OUT "
+    fi
+    if [[ $N -ge 20 ]]; then
+        W="${TENS[$((N / 10))]}"
+        OUT="$OUT${W^^}"
+        N=$((N % 10))
+        if [[ $N -gt 0 ]]; then
+            W="${ONES[$N]}"
+            OUT="$OUT-${W^^}"
+        fi
+    elif [[ $N -gt 0 ]]; then
+        W="${ONES[$N]}"
+        OUT="$OUT${W^^}"
+    fi
+    echo "$OUT"
+}
+
+spell() {
+    local N=$1
+    [[ $N == "0" ]] && { echo "ZERO"; return; }
+
+    local NEG=""
+    if [[ $N == -* ]]; then
+        NEG="NEGATIVE "
+        N="${N#-}"
+    fi
+
+    # remove leading zeros
+    N="${N#"${N%%[!0]*}"}"
+    [[ -z $N ]] && { echo "zero"; return; }
+
+    # pad to multiple of 3 digits
+    while [[ $((${#N} % 3)) -ne 0 ]]; do
+        N="0$N"
+    done
+
+    # split into 3-digit chunks from left to right
+    local CHUNKS=()
+    while [[ -n $N ]]; do
+        CHUNKS+=("${N:0:3}")
+        N="${N:3}"
+    done
+
+    local OUT="" NCHUNKS=${#CHUNKS[@]}
+    if [[ $NCHUNKS -gt ${#SCALE[@]} ]]; then
+        echo "error: number too large (max 10^66-1)" >&2
+        return 1
+    fi
+    for I in "${!CHUNKS[@]}"; do
+        local CHUNK=${CHUNKS[$I]}
+        CHUNK=$((10#$CHUNK))  # remove leading zeros for arithmetic
+        if [[ $CHUNK -gt 0 ]]; then
+            local PART SCALE_IDX=$((NCHUNKS - I - 1))
+            PART=$(spell_under_1000 "$CHUNK")
+            if [[ $SCALE_IDX -gt 0 && -n "${SCALE[$SCALE_IDX]}" ]]; then
+                PART="$PART ${SCALE[$SCALE_IDX]}"
+            fi
+            OUT="${OUT:+$OUT }$PART"
+        fi
+    done
+    echo "$NEG$OUT"
+}
+
+has_single_argument "$@" || die "usage: spell-number <integer>"
+is_integer "$1" || die "error: not an integer: $1"
+
+spell "$1"

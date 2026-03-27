@@ -1,0 +1,235 @@
+#!/bin/bash
+# spell-number-fr - convert integer to French words
+#
+# usage: spell-number-fr <number>
+#
+# Supports integers from 0 to 10^66-1 (vigintillion)
+# Negative numbers supported with "MOINS" prefix
+#
+# French number rules:
+# - 70-79: soixante-dix (60+10..19), 71 uses "et" (soixante et onze)
+# - 80-99: quatre-vingt(s) (4×20), no "et" for 81/91
+# - "quatre-vingts" loses 's' when followed by another number
+# - "cents" loses 's' when followed by another number
+# - "mille" is invariable, no "un" before it
+
+set -euo pipefail
+
+# --- Utilities ---
+
+die()               { echo "$1" >&2; exit 1; }
+has_single_argument() { [[ $# -eq 1 ]]; }
+is_integer()        { [[ $1 =~ ^-?[0-9]+$ ]]; }
+
+# --- Data ---
+
+ONES=(
+    zéro
+    un
+    deux
+    trois
+    quatre
+    cinq
+    six
+    sept
+    huit
+    neuf
+    dix
+    onze
+    douze
+    treize
+    quatorze
+    quinze
+    seize
+    dix-sept
+    dix-huit
+    dix-neuf
+)
+TENS=(
+    ''
+    ''
+    vingt
+    trente
+    quarante
+    cinquante
+    soixante
+)
+# French uses long scale
+SCALE_SG=(
+    ''
+    mille
+    million
+    milliard
+    billion
+    billiard
+    trillion
+    trilliard
+    quadrillion
+    quadrilliard
+    quintillion
+    quintilliard
+    sextillion
+    sextilliard
+    septillion
+    septilliard
+    octillion
+    octilliard
+    nonillion
+    nonilliard
+    décillion
+    décilliard
+    vigintillion
+)
+SCALE_PL=(
+    ''
+    mille
+    millions
+    milliards
+    billions
+    billiards
+    trillions
+    trilliards
+    quadrillions
+    quadrilliards
+    quintillions
+    quintilliards
+    sextillions
+    sextilliards
+    septillions
+    septilliards
+    octillions
+    octilliards
+    nonillions
+    nonilliards
+    décillions
+    décilliards
+    vigintillions
+)
+
+spell_under_100() {
+    local N=$1 OUT="" W
+    if [[ $N -lt 20 ]]; then
+        W="${ONES[$N]}"
+        OUT="${W^^}"
+    elif [[ $N -lt 70 ]]; then
+        local D=$((N / 10)) U=$((N % 10))
+        W="${TENS[$D]}"
+        OUT="${W^^}"
+        if [[ $U -eq 1 ]]; then
+            OUT="$OUT et UN"
+        elif [[ $U -gt 0 ]]; then
+            W="${ONES[$U]}"
+            OUT="$OUT-${W^^}"
+        fi
+    elif [[ $N -lt 80 ]]; then
+        # 70-79: soixante-dix, soixante et onze, soixante-douze...
+        local U=$((N - 60))
+        OUT="SOIXANTE"
+        if [[ $U -eq 11 ]]; then
+            OUT="$OUT et ONZE"
+        else
+            W="${ONES[$U]}"
+            OUT="$OUT-${W^^}"
+        fi
+    else
+        # 80-99: quatre-vingt(s)
+        local U=$((N - 80))
+        if [[ $U -eq 0 ]]; then
+            OUT="QUATRE-VINGTS"
+        else
+            OUT="QUATRE-VINGT"
+            W="${ONES[$U]}"
+            OUT="$OUT-${W^^}"
+        fi
+    fi
+    echo "$OUT"
+}
+
+spell_under_1000() {
+    local N=$1 OUT="" W
+    if [[ $N -ge 100 ]]; then
+        local H=$((N / 100))
+        if [[ $H -eq 1 ]]; then
+            OUT="cent"
+        else
+            W="${ONES[$H]}"
+            OUT="${W^^}-cent"
+        fi
+        N=$((N % 100))
+        if [[ $N -eq 0 && $H -gt 1 ]]; then
+            OUT="${OUT}s"
+        elif [[ $N -gt 0 ]]; then
+            OUT="$OUT-"
+        fi
+    fi
+    if [[ $N -gt 0 ]]; then
+        local PART
+        PART=$(spell_under_100 "$N")
+        OUT="$OUT$PART"
+    fi
+    echo "$OUT"
+}
+
+spell() {
+    local N=$1
+    [[ $N == "0" ]] && { echo "ZÉRO"; return; }
+
+    local NEG=""
+    if [[ $N == -* ]]; then
+        NEG="MOINS "
+        N="${N#-}"
+    fi
+
+    N="${N#"${N%%[!0]*}"}"
+    [[ -z $N ]] && { echo "ZÉRO"; return; }
+
+    while [[ $((${#N} % 3)) -ne 0 ]]; do
+        N="0$N"
+    done
+
+    local CHUNKS=()
+    while [[ -n $N ]]; do
+        CHUNKS+=("${N:0:3}")
+        N="${N:3}"
+    done
+
+    local OUT="" NCHUNKS=${#CHUNKS[@]}
+    if [[ $NCHUNKS -gt ${#SCALE_SG[@]} ]]; then
+        echo "error: number too large (max 10^66-1)" >&2
+        return 1
+    fi
+
+    for I in "${!CHUNKS[@]}"; do
+        local CHUNK=${CHUNKS[$I]}
+        CHUNK=$((10#$CHUNK))
+        if [[ $CHUNK -gt 0 ]]; then
+            local PART SCALE_IDX=$((NCHUNKS - I - 1)) SCALE_WORD
+            if [[ $SCALE_IDX -eq 1 ]]; then
+                # mille: no "un" before it, invariable
+                if [[ $CHUNK -eq 1 ]]; then
+                    PART="mille"
+                else
+                    PART=$(spell_under_1000 "$CHUNK")
+                    PART="$PART mille"
+                fi
+            elif [[ $SCALE_IDX -ge 2 ]]; then
+                PART=$(spell_under_1000 "$CHUNK")
+                if [[ $CHUNK -eq 1 ]]; then
+                    SCALE_WORD="${SCALE_SG[$SCALE_IDX]}"
+                else
+                    SCALE_WORD="${SCALE_PL[$SCALE_IDX]}"
+                fi
+                PART="$PART $SCALE_WORD"
+            else
+                PART=$(spell_under_1000 "$CHUNK")
+            fi
+            OUT="${OUT:+$OUT }$PART"
+        fi
+    done
+    echo "$NEG$OUT"
+}
+
+has_single_argument "$@" || die "usage: spell-number-fr <integer>"
+is_integer "$1" || die "error: not an integer: $1"
+
+spell "$1"

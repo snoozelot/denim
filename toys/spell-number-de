@@ -1,0 +1,203 @@
+#!/bin/bash
+# spell-number-de - convert integer to German words
+#
+# usage: spell-number-de <number>
+#
+# Supports integers from 0 to 10^66-1 (Vigintillion)
+# Negative numbers supported with "MINUS" prefix
+
+set -euo pipefail
+
+# --- Utilities ---
+
+die()               { echo "$1" >&2; exit 1; }
+has_single_argument() { [[ $# -eq 1 ]]; }
+is_integer()        { [[ $1 =~ ^-?[0-9]+$ ]]; }
+
+# --- Data ---
+
+ONES=(
+    null
+    eins
+    zwei
+    drei
+    vier
+    fünf
+    sechs
+    sieben
+    acht
+    neun
+    zehn
+    elf
+    zwölf
+    dreizehn
+    vierzehn
+    fünfzehn
+    sechzehn
+    siebzehn
+    achtzehn
+    neunzehn
+)
+TENS=(
+    ''
+    ''
+    zwanzig
+    dreißig
+    vierzig
+    fünfzig
+    sechzig
+    siebzig
+    achtzig
+    neunzig
+)
+# German uses long scale for billion+ but common usage follows short scale
+# Using standard German names
+SCALE_SG=(
+    ''
+    tausend
+    million
+    milliarde
+    billion
+    billiarde
+    trillion
+    trilliarde
+    quadrillion
+    quadrilliarde
+    quintillion
+    quintilliarde
+    sextillion
+    sextilliarde
+    septillion
+    septilliarde
+    oktillion
+    oktilliarde
+    nonillion
+    nonilliarde
+    dezillion
+    dezilliarde
+    vigintillion
+)
+SCALE_PL=(
+    ''
+    tausend
+    millionen
+    milliarden
+    billionen
+    billiarden
+    trillionen
+    trilliarden
+    quadrillionen
+    quadrilliarden
+    quintillionen
+    quintilliarden
+    sextillionen
+    sextilliarden
+    septillionen
+    septilliarden
+    oktillionen
+    oktilliarden
+    nonillionen
+    nonilliarden
+    dezillionen
+    dezilliarden
+    vigintillionen
+)
+
+spell_under_1000() {
+    local N=$1 CONTEXT=$2 OUT="" W
+    if [[ $N -ge 100 ]]; then
+        W="${ONES[$((N / 100))]}"
+        [[ $W == "eins" ]] && W="ein"
+        OUT="${W^^}-hundert"
+        N=$((N % 100))
+        [[ $N -gt 0 ]] && OUT="$OUT-"
+    fi
+    if [[ $N -ge 20 ]]; then
+        local T=$((N % 10))
+        if [[ $T -gt 0 ]]; then
+            W="${ONES[$T]}"
+            [[ $W == "eins" ]] && W="ein"
+            OUT="${OUT}${W^^}-und-"
+        fi
+        W="${TENS[$((N / 10))]}"
+        OUT="${OUT}${W^^}"
+    elif [[ $N -gt 0 ]]; then
+        W="${ONES[$N]}"
+        # "eins" becomes "ein" before nouns, stays "eins" standalone
+        if [[ $W == "eins" && $CONTEXT != "standalone" ]]; then
+            W="ein"
+            # "eine" for feminine nouns (Million, Milliarde, etc.)
+            [[ $CONTEXT == "feminine" ]] && W="eine"
+        fi
+        OUT="${OUT}${W^^}"
+    fi
+    echo "$OUT"
+}
+
+spell() {
+    local N=$1
+    [[ $N == "0" ]] && { echo "NULL"; return; }
+
+    local NEG=""
+    if [[ $N == -* ]]; then
+        NEG="MINUS "
+        N="${N#-}"
+    fi
+
+    # remove leading zeros
+    N="${N#"${N%%[!0]*}"}"
+    [[ -z $N ]] && { echo "NULL"; return; }
+
+    # pad to multiple of 3 digits
+    while [[ $((${#N} % 3)) -ne 0 ]]; do
+        N="0$N"
+    done
+
+    # split into 3-digit chunks from left to right
+    local CHUNKS=()
+    while [[ -n $N ]]; do
+        CHUNKS+=("${N:0:3}")
+        N="${N:3}"
+    done
+
+    local OUT="" NCHUNKS=${#CHUNKS[@]}
+    if [[ $NCHUNKS -gt ${#SCALE_SG[@]} ]]; then
+        echo "error: number too large (max 10^66-1)" >&2
+        return 1
+    fi
+
+    for I in "${!CHUNKS[@]}"; do
+        local CHUNK=${CHUNKS[$I]}
+        CHUNK=$((10#$CHUNK))
+        if [[ $CHUNK -gt 0 ]]; then
+            local PART SCALE_IDX=$((NCHUNKS - I - 1)) SCALE_WORD
+            # determine context for "ein/eins/eine"
+            local CONTEXT="standalone"
+            if [[ $SCALE_IDX -eq 1 ]]; then
+                CONTEXT="tausend"
+            elif [[ $SCALE_IDX -ge 2 ]]; then
+                CONTEXT="feminine"
+            fi
+            PART=$(spell_under_1000 "$CHUNK" "$CONTEXT")
+            if [[ $SCALE_IDX -eq 1 ]]; then
+                # tausend: space, lowercase
+                PART="${PART} tausend"
+            elif [[ $SCALE_IDX -ge 2 ]]; then
+                # Million+: space, singular/plural
+                if [[ $CHUNK -eq 1 ]]; then
+                    SCALE_WORD="${SCALE_SG[$SCALE_IDX]}"
+                else
+                    SCALE_WORD="${SCALE_PL[$SCALE_IDX]}"
+                fi
+                PART="$PART ${SCALE_WORD}"
+            fi
+            OUT="${OUT:+$OUT }$PART"
+        fi
+    done
+    echo "$NEG$OUT"
+}
+
+has_single_argument "$@" || die "usage: spell-number-de <integer>"
+is_integer "$1" || die "error: not an integer: $1"
+
+spell "$1"

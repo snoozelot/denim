@@ -1,0 +1,49 @@
+#!/bin/bash
+# spell-topic - multilingual vocabulary cheat sheet
+#
+# usage: spell-topic <topic>
+#
+# Topics: weekday, month
+
+case "$1" in
+    weekday|weekdays|week|day|days|woche|semaine)
+        cat <<'EOF'
+    English    Deutsch     français   русский
+--  ---------  ----------  ---------  ------------
+    weekday    Wochentag   semaine    день недели
+--  ---------  ----------  ---------  ------------
+ 1  Monday     Montag      lundi      понедельник
+ 2  Tuesday    Dienstag    mardi      вторник
+ 3  Wednesday  Mittwoch    mercredi   среда
+ 4  Thursday   Donnerstag  jeudi      четверг
+ 5  Friday     Freitag     vendredi   пятница
+ 6  Saturday   Samstag     samedi     суббота
+ 7  Sunday     Sonntag     dimanche   воскресенье
+EOF
+        ;;
+    month|months|monat|mois)
+        cat <<'EOF'
+     English    Deutsch    français   русский
+---  ---------  ---------  ---------  ---------
+     month      Monat      mois       месяц
+---  ---------  ---------  ---------  ---------
+  1  January    Januar     janvier    январь
+  2  February   Februar    février    февраль
+  3  March      März       mars       март
+  4  April      April      avril      апрель
+  5  May        Mai        mai        май
+  6  June       Juni       juin       июнь
+  7  July       Juli       juillet    июль
+  8  August     August     août       август
+  9  September  September  septembre  сентябрь
+ 10  October    Oktober    octobre    октябрь
+ 11  November   November   novembre   ноябрь
+ 12  December   Dezember   décembre   декабрь
+EOF
+        ;;
+    *)
+        echo "usage: spell-topic <topic>" >&2
+        echo "topics: weekday, month" >&2
+        exit 1
+        ;;
+esac
