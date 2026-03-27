@@ -1,0 +1,198 @@
+#!/bin/bash
+# vicat - Syntax highlight files using vim, output ANSI to terminal
+#
+# Uses vim's syntax engine to colorize any file vim supports.
+# Vimscript embedded as heredoc, cleanly separated from bash.
+#
+# Usage:
+#   vicat [OPTIONS] [FILE...]
+#   cat FILE | vicat
+#
+# Options:
+#   -c CMD      Execute vim command (e.g., -c "colorscheme desert")
+#   -ft TYPE    Force filetype (e.g., -ft sql, -ft bindzone)
+#   -u FILE     Use FILE as vimrc (default: ~/.vicatrc if exists)
+#
+# Examples:
+#   vicat script.sh
+#   vicat -ft sql query.txt
+#   echo "SELECT * FROM t" | vicat -ft sql
+
+# --- vimscript as data ---
+
+VIML=$(cat << 'END_VIML'
+if &cp | set nocp | endif
+
+let s:mode = &t_Co == 0 ? 'term' : 'cterm'
+let s:cache = {}
+
+function! s:color_valid(c)
+    return a:c != "" && a:c != -1
+endfunction
+
+function! s:ansi_fg(fg)
+    let n = str2nr(a:fg)
+    return n < 8 ? ";3".n : n < 16 ? ";9".(n-8) : ";38;5;".n
+endfunction
+
+function! s:ansi_bg(bg)
+    let n = str2nr(a:bg)
+    return n < 8 ? ";4".n : n < 16 ? ";10".(n-8) : ";48;5;".n
+endfunction
+
+function! s:group_to_ansi(id)
+    let id = a:id ? a:id : hlID('Normal')
+    if has_key(s:cache, id) | return s:cache[id] | endif
+
+    let fg = synIDattr(id, 'fg', s:mode)
+    let bg = synIDattr(id, 'bg', s:mode)
+    let bold = synIDattr(id, 'bold', s:mode) == 1
+    let rev = synIDattr(id, 'reverse', s:mode) == 1
+
+    if rev | let [fg, bg] = [bg, fg] | endif
+
+    let code = "\<Esc>[0"
+    if bold             | let code .= ";1"           | endif
+    if s:color_valid(fg) | let code .= s:ansi_fg(fg) | endif
+    if s:color_valid(bg) | let code .= s:ansi_bg(bg) | endif
+    let code .= "m"
+
+    let s:cache[id] = code
+    return code
+endfunction
+
+function! s:get_syn_ids(lnum, len)
+    let ids = []
+    for col in range(1, a:len)
+        call add(ids, synIDtrans(synID(a:lnum, col, 1)))
+    endfor
+    return ids
+endfunction
+
+function! s:highlight_line(lnum)
+    let line = getline(a:lnum)
+    let len = strchars(line)
+    if len == 0 | return "" | endif
+
+    let ids = s:get_syn_ids(a:lnum, len)
+    let out = ""
+    let col = 0
+
+    while col < len
+        let id = ids[col]
+        let out .= s:group_to_ansi(id)
+
+        let start = col
+        while col < len && ids[col] == id
+            let col += 1
+        endwhile
+
+        let out .= strpart(line, start, col - start)
+    endwhile
+
+    return out
+endfunction
+
+function! AnsiHighlight(outfile)
+    let lines = []
+    for lnum in range(1, line('$'))
+        call add(lines, s:highlight_line(lnum))
+    endfor
+    let lines[-1] .= "\<Esc>[0m"
+    call writefile(lines, a:outfile)
+endfunction
+END_VIML
+)
+
+# --- helpers ---
+
+die() { echo "vicat: $1" >&2; exit 1; }
+warn() { echo "vicat: $1" >&2; }
+
+got() { [[ -n $1 ]]; }
+no()  { [[ -z $1 ]]; }
+
+is_readable()     { [[ -r "$1" ]]; }
+is_nonempty()     { [[ -s "$1" ]]; }
+is_stdin()        { [[ "$1" = "-" ]]; }
+vicatrc_exists()  { [[ -f ~/.vicatrc ]]; }
+no_files()        { [[ ${#FILES[@]} -eq 0 ]]; }
+
+read_stdin() { cat > "$TMPOUT"; }
+
+default_rc() { vicatrc_exists && echo ~/.vicatrc; }
+
+# --- parse options ---
+
+CMD=""
+FILETYPE=""
+VIMRC=""
+
+parse_opts() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -c)  CMD=$2;              shift 2 ;;
+            -ft) FILETYPE="set ft=$2"; shift 2 ;;
+            -u)  VIMRC=$2;            shift 2 ;;
+            --)  shift; break ;;
+            -)   break ;;
+            -*)  die "unknown option: $1" ;;
+            *)   break ;;
+        esac
+    done
+    FILES=("$@")
+}
+
+# --- core ---
+
+write_viml() {
+    echo "$VIML" > "$TMPVIML"
+}
+
+run_vim() {
+    local FILE=$1
+
+    vim -E -X -R -i NONE ${VIMRC:+-u "$VIMRC"} \
+        -c "set t_Co=256" \
+        -c "syntax on" \
+        -c "${CMD:-silent!}" \
+        -c "source $TMPVIML" \
+        -c "edit $FILE" \
+        -c "${FILETYPE:-silent!}" \
+        -c "call AnsiHighlight('$TMPOUT')" \
+        -c "q!" \
+        </dev/null >/dev/null 2>&1
+}
+
+highlight_file() {
+    local FILE=$1
+
+    is_stdin "$FILE" && { read_stdin; FILE=$TMPOUT; }
+
+    is_readable "$FILE" || { warn "cannot read: $FILE"; return 1; }
+    is_nonempty "$FILE" || return 0
+
+    run_vim "$FILE"
+    cat "$TMPOUT"
+}
+
+# --- main ---
+
+main() {
+    TMPVIML=$(mktemp)
+    TMPOUT=$(mktemp)
+    trap 'rm -f "$TMPVIML" "$TMPOUT"' EXIT
+
+    parse_opts "$@"
+
+    no "$VIMRC" && VIMRC=$(default_rc)
+    no_files && FILES=(-)
+
+    write_viml
+
+    for FILE in "${FILES[@]}"; do
+        highlight_file "$FILE"
+    done
+}
+
+main "$@"
