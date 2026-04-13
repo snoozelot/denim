@@ -1,10 +1,20 @@
 #!/bin/bash
-# spell-number-de - convert integer to German words
+# spell-number-de — convert integer to German words
 #
-# usage: spell-number-de <number>
+# WHAT IT DOES
 #
-# Supports integers from 0 to 10^66-1 (Vigintillion)
-# Negative numbers supported with "MINUS" prefix
+# Converts integers to German words. Supports 0 to 10^66-1 (Vigintillion).
+# Negative numbers get "MINUS" prefix.
+#
+# USAGE
+#
+#   spell-number-de <number>
+#
+# EXAMPLES
+#
+#   spell-number-de 42       # zweiundvierzig
+#   spell-number-de 1000     # eintausend
+#   spell-number-de -5       # MINUS fünf
 
 set -euo pipefail
 

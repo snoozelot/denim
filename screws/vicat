@@ -1,19 +1,24 @@
 #!/bin/bash
-# vicat - Syntax highlight files using vim, output ANSI to terminal
+# vicat — Syntax highlight files using vim, output ANSI to terminal
+#
+# WHAT IT DOES
 #
 # Uses vim's syntax engine to colorize any file vim supports.
 # Vimscript embedded as heredoc, cleanly separated from bash.
 #
-# Usage:
+# USAGE
+#
 #   vicat [OPTIONS] [FILE...]
 #   cat FILE | vicat
 #
-# Options:
+# OPTIONS
+#
 #   -c CMD      Execute vim command (e.g., -c "colorscheme desert")
 #   -ft TYPE    Force filetype (e.g., -ft sql, -ft bindzone)
 #   -u FILE     Use FILE as vimrc (default: ~/.vicatrc if exists)
 #
-# Examples:
+# EXAMPLES
+#
 #   vicat script.sh
 #   vicat -ft sql query.txt
 #   echo "SELECT * FROM t" | vicat -ft sql

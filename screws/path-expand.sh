@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# path-expand-bash - expand shortened paths to full paths
+# path-expand-bash — expand shortened paths to full paths
+#
+# WHAT IT DOES
 #
 # For each directory level, expands a prefix to the full directory name
 # if it uniquely matches exactly one entry. If ambiguous or no match,
 # the prefix is kept unchanged.
 #
-# Usage:
+# USAGE
+#
 #   path-expand-bash PATH
 #   echo PATH | path-expand-bash
 #
-# Examples:
+# EXAMPLES
+#
 #   path-expand-bash /h/l/bin/bad/parse_number.h
 #   -> /home/luthor/bin/bad/parse_number.h
 #

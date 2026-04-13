@@ -1,31 +1,57 @@
 #!/usr/bin/env bash
-# arc - Universal archive tool
+# arc — Universal archive tool
+#
+# WHAT IT DOES
 #
 # Simple wrapper for common archive formats. Detects format by extension
 # and calls the appropriate tool. Smart extraction creates subdirectory
 # when archive contains multiple top-level entries (prevents tarbombs).
 #
-# Usage:
+# USAGE
+#
 #   arc x ARCHIVE [DIR]     Extract archive (to DIR if specified)
 #   arc l ARCHIVE           List contents
 #   arc c ARCHIVE FILES...  Create archive (format from extension)
 #   arc t ARCHIVE           Test archive integrity
 #
-# Supported formats:
+# EXAMPLES
+#
+#   arc x backup.tar.gz              # extract to current dir
+#   arc x backup.tar.gz /tmp         # extract to /tmp
+#   arc l archive.zip                # list contents
+#   arc c project.tar.xz src/ doc/   # create archive
+#
+# SUPPORTED FORMATS
+#
 #   tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, tar.lzma, tar.lz, tar.br
 #   gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3
 #   zip, 7z, rar, lzh/lha, cab, ace
 #   deb, rpm, cpio, ar
 #   exe (Inno Setup), InstallShield
 #   cbz, cbr, cb7, cbt (comic books)
+#   iso (disk images)
 
 set -euo pipefail
 
+# ============================================================================
+# Utilities
+# ============================================================================
+
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-# Strip archive extension to get base name
+file_exists()       { [[ -f $1 ]]; }
+path_exists()       { [[ -e $1 ]]; }
+is_tarbomb()        { [[ $1 -gt 1 ]]; }
+has_arguments()     { [[ $# -gt 0 ]]; }
+single_file_only()  { [[ $# -eq 1 ]]; }
+has_files()         { [[ $# -ge 2 ]]; }  # archive + sources
+
+# ============================================================================
+# Archive helpers
+# ============================================================================
+
 strip_ext() {
-    local F="$1"
+    local F=$1
     # tar compounds
     F="${F%.tar.gz}"; F="${F%.tgz}"
     F="${F%.tar.bz2}"; F="${F%.tbz2}"; F="${F%.tbz}"
@@ -47,13 +73,15 @@ strip_ext() {
     F="${F%.exe}"
     # comic books
     F="${F%.cbz}"; F="${F%.cbr}"; F="${F%.cb7}"; F="${F%.cbt}"
+    # disk images
+    F="${F%.iso}"
     basename "$F"
 }
 
 # Count top-level entries in archive
 count_toplevel() {
-    local ARCHIVE="$1"
-    local TYPE="$2"
+    local ARCHIVE=$1
+    local TYPE=$2
     local LISTING
 
     case "$TYPE" in
@@ -69,7 +97,7 @@ count_toplevel() {
             LISTING=$(bzip3 -dc "$ARCHIVE" 2>/dev/null | tar -tf - 2>/dev/null) ;;
         zip|cbz)
             LISTING=$(unzip -Z1 "$ARCHIVE" 2>/dev/null) ;;
-        7z|cb7)
+        7z|cb7|iso)
             LISTING=$(7z l -slt "$ARCHIVE" 2>/dev/null | sed -n 's/^Path = //p' | tail -n +2) ;;
         rar|cbr)
             LISTING=$(unrar lb "$ARCHIVE" 2>/dev/null) ;;
@@ -94,7 +122,7 @@ count_toplevel() {
 
 # Detect archive type from filename
 detect_type() {
-    local F="$1"
+    local F=$1
     case "${F,,}" in
         # tar compounds
         *.tar.gz|*.tgz)         echo "tar.gz" ;;
@@ -138,14 +166,16 @@ detect_type() {
         *.cbr)                  echo "cbr" ;;
         *.cb7)                  echo "cb7" ;;
         *.cbt)                  echo "cbt" ;;
+        # disk images
+        *.iso)                  echo "iso" ;;
         *)                      die "Unknown archive type: $F" ;;
     esac
 }
 
 # Try InstallShield first, fall back to MS Cabinet
 extract_cab() {
-    local ARCHIVE="$1"
-    local DEST="$2"
+    local ARCHIVE=$1
+    local DEST=$2
     # Check if InstallShield format (has data1.hdr nearby or specific signature)
     if unshield t "$ARCHIVE" &>/dev/null; then
         unshield -d "$DEST" x "$ARCHIVE"
@@ -154,22 +184,25 @@ extract_cab() {
     fi
 }
 
-# Extract archive (smart: creates subdir if multiple top-level entries)
+# ============================================================================
+# Commands
+# ============================================================================
+
 cmd_extract() {
-    local ARCHIVE="$1"
-    local DEST="${2:-.}"
+    local ARCHIVE=$1
+    local DEST=${2:-.}
     local TYPE COUNT SUBDIR
 
-    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+    file_exists "$ARCHIVE" || die "File not found: $ARCHIVE"
 
     TYPE=$(detect_type "$ARCHIVE")
     COUNT=$(count_toplevel "$ARCHIVE" "$TYPE")
 
     # Create subdir if multiple top-level entries (prevent tarbomb)
-    if [[ "$COUNT" -gt 1 ]]; then
+    if is_tarbomb "$COUNT"; then
         SUBDIR=$(strip_ext "$ARCHIVE")
         DEST="$DEST/$SUBDIR"
-        [[ -e "$DEST" ]] && die "Destination already exists: $DEST"
+        if path_exists "$DEST"; then die "Destination already exists: $DEST"; fi
         printf 'Extracting to %s/\n' "$DEST"
     fi
 
@@ -201,7 +234,7 @@ cmd_extract() {
         bz3)        bzip3 -dc "$ARCHIVE" > "$DEST/$(basename "${ARCHIVE%.bz3}")" ;;
         # archives
         zip|cbz)    unzip -q "$ARCHIVE" -d "$DEST" ;;
-        7z|cb7)     7z x -o"$DEST" "$ARCHIVE" ;;
+        7z|cb7|iso) 7z x -o"$DEST" "$ARCHIVE" ;;
         rar|cbr)    unrar x "$ARCHIVE" "$DEST/" ;;
         lzh)        lha xw="$DEST" "$ARCHIVE" ;;
         cab)        extract_cab "$ARCHIVE" "$DEST" ;;
@@ -220,11 +253,11 @@ cmd_extract() {
 
 # List archive contents
 cmd_list() {
-    local ARCHIVE="$1"
+    local ARCHIVE=$1
     local TYPE
-    TYPE=$(detect_type "$ARCHIVE")
 
-    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+    file_exists "$ARCHIVE" || die "File not found: $ARCHIVE"
+    TYPE=$(detect_type "$ARCHIVE")
 
     case "$TYPE" in
         # tar variants
@@ -244,7 +277,7 @@ cmd_list() {
                     echo "(single file compressed)" ;;
         # archives
         zip|cbz)    unzip -l "$ARCHIVE" ;;
-        7z|cb7)     7z l "$ARCHIVE" ;;
+        7z|cb7|iso) 7z l "$ARCHIVE" ;;
         rar|cbr)    unrar l "$ARCHIVE" ;;
         lzh)        lha l "$ARCHIVE" ;;
         cab)        cabextract -l "$ARCHIVE" ;;
@@ -263,12 +296,13 @@ cmd_list() {
 
 # Create archive
 cmd_create() {
-    local ARCHIVE="$1"
-    shift
+    local ARCHIVE=$1
     local TYPE
+
+    shift
     TYPE=$(detect_type "$ARCHIVE")
 
-    [[ $# -gt 0 ]] || die "No files specified"
+    has_arguments "$@" || die "No files specified"
 
     case "$TYPE" in
         # tar variants
@@ -284,16 +318,16 @@ cmd_create() {
         tar.sz)     tar -cf - "$@" | snzip > "$ARCHIVE" ;;
         tar.bz3)    tar -cf - "$@" | bzip3 > "$ARCHIVE" ;;
         # single file compression
-        gz)         [[ $# -eq 1 ]] || die "gz: single file only"; gzip -c "$1" > "$ARCHIVE" ;;
-        bz2)        [[ $# -eq 1 ]] || die "bz2: single file only"; bzip2 -c "$1" > "$ARCHIVE" ;;
-        xz)         [[ $# -eq 1 ]] || die "xz: single file only"; xz -c "$1" > "$ARCHIVE" ;;
-        zst)        [[ $# -eq 1 ]] || die "zst: single file only"; zstd -c "$1" > "$ARCHIVE" ;;
-        lz4)        [[ $# -eq 1 ]] || die "lz4: single file only"; lz4 "$1" "$ARCHIVE" ;;
-        lzma)       [[ $# -eq 1 ]] || die "lzma: single file only"; lzma -c "$1" > "$ARCHIVE" ;;
-        lz)         [[ $# -eq 1 ]] || die "lz: single file only"; lzip -c "$1" > "$ARCHIVE" ;;
-        br)         [[ $# -eq 1 ]] || die "br: single file only"; brotli -c "$1" > "$ARCHIVE" ;;
-        sz)         [[ $# -eq 1 ]] || die "sz: single file only"; snzip -c "$1" > "$ARCHIVE" ;;
-        bz3)        [[ $# -eq 1 ]] || die "bz3: single file only"; bzip3 -c "$1" > "$ARCHIVE" ;;
+        gz)         single_file_only "$@" || die "gz: single file only"; gzip -c "$1" > "$ARCHIVE" ;;
+        bz2)        single_file_only "$@" || die "bz2: single file only"; bzip2 -c "$1" > "$ARCHIVE" ;;
+        xz)         single_file_only "$@" || die "xz: single file only"; xz -c "$1" > "$ARCHIVE" ;;
+        zst)        single_file_only "$@" || die "zst: single file only"; zstd -c "$1" > "$ARCHIVE" ;;
+        lz4)        single_file_only "$@" || die "lz4: single file only"; lz4 "$1" "$ARCHIVE" ;;
+        lzma)       single_file_only "$@" || die "lzma: single file only"; lzma -c "$1" > "$ARCHIVE" ;;
+        lz)         single_file_only "$@" || die "lz: single file only"; lzip -c "$1" > "$ARCHIVE" ;;
+        br)         single_file_only "$@" || die "br: single file only"; brotli -c "$1" > "$ARCHIVE" ;;
+        sz)         single_file_only "$@" || die "sz: single file only"; snzip -c "$1" > "$ARCHIVE" ;;
+        bz3)        single_file_only "$@" || die "bz3: single file only"; bzip3 -c "$1" > "$ARCHIVE" ;;
         # archives
         zip|cbz)    zip -r "$ARCHIVE" "$@" ;;
         7z|cb7)     7z a "$ARCHIVE" "$@" ;;
@@ -307,11 +341,11 @@ cmd_create() {
 
 # Test archive integrity
 cmd_test() {
-    local ARCHIVE="$1"
+    local ARCHIVE=$1
     local TYPE
-    TYPE=$(detect_type "$ARCHIVE")
 
-    [[ -f "$ARCHIVE" ]] || die "File not found: $ARCHIVE"
+    file_exists "$ARCHIVE" || die "File not found: $ARCHIVE"
+    TYPE=$(detect_type "$ARCHIVE")
 
     case "$TYPE" in
         # tar variants
@@ -339,7 +373,7 @@ cmd_test() {
         bz3)        bzip3 -t "$ARCHIVE" ;;
         # archives
         zip|cbz)    unzip -t "$ARCHIVE" ;;
-        7z|cb7)     7z t "$ARCHIVE" ;;
+        7z|cb7|iso) 7z t "$ARCHIVE" ;;
         rar|cbr)    unrar t "$ARCHIVE" ;;
         lzh)        lha t "$ARCHIVE" ;;
         cab)        cabextract -t "$ARCHIVE" ;;
@@ -353,7 +387,10 @@ cmd_test() {
     echo "OK"
 }
 
-# Usage
+# ============================================================================
+# Main
+# ============================================================================
+
 usage() {
     cat << 'EOF'
 Usage: arc COMMAND ARCHIVE [ARGS...]
@@ -371,6 +408,7 @@ Formats:
   deb, rpm, cpio, ar
   exe (Inno Setup), cab (InstallShield)
   cbz, cbr, cb7, cbt (comic books)
+  iso (disk images)
 
 Examples:
   arc x foo.tar.xz           Extract (auto-creates subdir if needed)
@@ -382,16 +420,25 @@ EOF
     exit 1
 }
 
-# Main
-[[ $# -ge 1 ]] || usage
+main() {
+    local CMD
 
-CMD="$1"
-shift
+    has_arguments "$@" || usage
 
-case "$CMD" in
-    x|extract)  [[ $# -ge 1 ]] || usage; cmd_extract "$@" ;;
-    l|list)     [[ $# -eq 1 ]] || usage; cmd_list "$1" ;;
-    c|create)   [[ $# -ge 2 ]] || usage; cmd_create "$@" ;;
-    t|test)     [[ $# -eq 1 ]] || usage; cmd_test "$1" ;;
-    *)          usage ;;
-esac
+    CMD=$1
+    shift
+
+    case "$CMD" in
+        x|extract)  has_arguments "$@" || usage;
+                    cmd_extract "$@" ;;
+        l|list)     single_file_only "$@" || usage;
+                    cmd_list "$1" ;;
+        c|create)   has_files "$@" || usage;
+                    cmd_create "$@" ;;
+        t|test)     single_file_only "$@" || usage;
+                    cmd_test "$1" ;;
+        *)          usage ;;
+    esac
+}
+
+main "$@"

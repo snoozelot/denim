@@ -1,7 +1,20 @@
 #!/bin/bash
-
-# Cycle through a ring of options, return the next item after current
-# Usage: cycle --current <current> <item1> <item2> ... <itemN>
+# cycle — Cycle through a ring of options, return next after current
+#
+# WHAT IT DOES
+#
+# Given a current value and a list of items, returns the item following
+# current. If current is last or not found, returns first.
+#
+# USAGE
+#
+#   cycle --current <current> <item1> <item2> ... <itemN>
+#
+# EXAMPLES
+#
+#   cycle --current b a b c d      # outputs: c
+#   cycle --current d a b c d      # outputs: a (wraps)
+#   cycle --current x a b c        # outputs: a (not found)
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 

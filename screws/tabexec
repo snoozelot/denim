@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# tabexec - Execute Commands in Tabular Format
+# tabexec — Execute Commands in Tabular Format
+#
+# WHAT IT DOES
 #
 # Run commands for each input item and format output as aligned table.
 # Supports multipart columns (same header, independent alignment).
 #
-# Usage:
+# USAGE
+#
 #   tabexec [OPTIONS] --column NAME CMD ... [--] [ITEMS...]
 #
-# Options:
+# OPTIONS
+#
 #   --column NAME CMD   Define column (repeat for multipart under same NAME)
 #   --left              Left-align preceding column (default)
 #   --right             Right-align preceding column
@@ -23,7 +27,8 @@
 # Modifiers (--left, --right, --tight) follow --column and apply to that header.
 # Once set, the modifier applies to all columns with the same header name.
 #
-# Examples:
+# EXAMPLES
+#
 #   ls | tabexec --column Name "{}" --column Size "du -sh {}"
 #   tabexec --column Dir "{}" --column Files "ls {} | wc -l" -- /tmp /var
 #

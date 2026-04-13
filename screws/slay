@@ -1,6 +1,17 @@
 #!/bin/bash
-# slay - Kill processes with SIGKILL
+# slay — Kill processes with SIGKILL
 #
-# Usage: slay PID...
+# WHAT IT DOES
+#
+# Sends SIGKILL to one or more processes. Shorthand for kill -SIGKILL.
+#
+# USAGE
+#
+#   slay PID...
+#
+# EXAMPLES
+#
+#   slay 12345                # kill single process
+#   slay $(pgrep firefox)     # kill all firefox processes
 
 exec kill -SIGKILL "$@"

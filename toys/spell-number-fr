@@ -1,12 +1,24 @@
 #!/bin/bash
-# spell-number-fr - convert integer to French words
+# spell-number-fr — convert integer to French words
 #
-# usage: spell-number-fr <number>
+# WHAT IT DOES
 #
-# Supports integers from 0 to 10^66-1 (vigintillion)
-# Negative numbers supported with "MOINS" prefix
+# Converts integers to French words. Supports 0 to 10^66-1 (vigintillion).
+# Negative numbers get "MOINS" prefix.
 #
-# French number rules:
+# USAGE
+#
+#   spell-number-fr <number>
+#
+# EXAMPLES
+#
+#   spell-number-fr 42       # quarante-deux
+#   spell-number-fr 71       # soixante et onze
+#   spell-number-fr 80       # quatre-vingts
+#   spell-number-fr 91       # quatre-vingt-onze
+#
+# FRENCH NUMBER RULES
+#
 # - 70-79: soixante-dix (60+10..19), 71 uses "et" (soixante et onze)
 # - 80-99: quatre-vingt(s) (4×20), no "et" for 81/91
 # - "quatre-vingts" loses 's' when followed by another number

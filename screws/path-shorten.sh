@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# path-shorten-bash - shorten paths using minimal unique prefixes
+# path-shorten-bash — shorten paths using minimal unique prefixes
+#
+# WHAT IT DOES
 #
 # For each directory level (except the last), finds the shortest prefix
 # that uniquely identifies it among its siblings. The final component
 # (filename) is kept unchanged.
 #
-# Usage:
+# USAGE
+#
 #   path-shorten-bash PATH
 #   echo PATH | path-shorten-bash
 #
-# Examples:
+# EXAMPLES
+#
 #   path-shorten-bash /home/luthor/bin/bad/parse_number.h
 #   -> /h/l/bin/bad/parse_number.h
 #

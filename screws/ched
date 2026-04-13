@@ -1,25 +1,30 @@
 #!/bin/bash
-# ched - Cache command output with time-based expiration
+# ched — Cache command output with time-based expiration
+#
+# WHAT IT DOES
 #
 # Caches stdout (and optionally stderr) of commands. On cache hit within
 # timeout, replays cached output. Cache key is command + working directory.
 #
-# Usage:
-#   ched-my [-t SECONDS] [-i] [-e] [--dont-cache-on-error] COMMAND...
-#   ched-my --prune[=DAYS]
+# USAGE
 #
-# Options:
+#   ched [-t SECONDS] [-i] [-e] [--dont-cache-on-error] COMMAND...
+#   ched --prune[=DAYS]
+#
+# OPTIONS
+#
 #   -t, --timeout=SECONDS       Cache duration (default: 10)
 #   -i, --ignore-working-dir    Exclude working dir from cache key
 #   -e, --cache-stderr          Cache stderr as well as stdout
 #       --dont-cache-on-error   Don't cache if command fails
 #       --prune[=DAYS]          Delete cache entries older than DAYS (default: 7)
 #
-# Examples:
-#   ched-my -t 60 curl -s https://api.example.com/status
-#   ched-my -i -t 300 expensive-computation
-#   ched-my --prune        # delete entries older than 7 days
-#   ched-my --prune=30     # delete entries older than 30 days
+# EXAMPLES
+#
+#   ched -t 60 curl -s https://api.example.com/status
+#   ched -i -t 300 expensive-computation
+#   ched --prune        # delete entries older than 7 days
+#   ched --prune=30     # delete entries older than 30 days
 
 set -euo pipefail
 
@@ -55,8 +60,8 @@ die() {
 
 usage() {
     cat <<'EOF'
-usage: ched-my [-t SECONDS] [-i] [-e] [--dont-cache-on-error] command...
-       ched-my --prune[=DAYS]
+usage: ched [-t SECONDS] [-i] [-e] [--dont-cache-on-error] command...
+       ched --prune[=DAYS]
 
 Options:
   -t, --timeout=SECONDS       Cache duration (default: 10)

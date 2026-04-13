@@ -1,9 +1,23 @@
 #!/bin/bash
-# spell-topic - multilingual vocabulary cheat sheet
+# spell-topic — multilingual vocabulary cheat sheet
 #
-# usage: spell-topic <topic>
+# WHAT IT DOES
 #
-# Topics: weekday, month
+# Prints vocabulary tables for common topics (weekday, month) in
+# English, German, French, and Russian.
+#
+# USAGE
+#
+#   spell-topic <topic>
+#
+# TOPICS
+#
+#   weekday, month
+#
+# EXAMPLES
+#
+#   spell-topic weekday    # prints Mon-Sun in 4 languages
+#   spell-topic month       # prints Jan-Dec in 4 languages
 
 case "$1" in
     weekday|weekdays|week|day|days|woche|semaine)

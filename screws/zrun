@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# zrun - Run command with transparently decompressed file arguments
+# zrun — Run command with transparently decompressed file arguments
+#
+# WHAT IT DOES
 #
 # Any compressed file arguments are decompressed to temp files, and the
 # command runs with decompressed versions. Temp files are cleaned up after.
 #
-# Usage:
+# USAGE
+#
 #   zrun COMMAND [ARGS...]
 #   zCOMMAND [ARGS...]          (when symlinked as zless, zcat, etc.)
 #
-# Supported formats:
+# SUPPORTED FORMATS
+#
 #   gz, bz2, xz, zst, lz4, lzma, lz, br, sz, bz3, Z, lzo
 #
-# Examples:
+# EXAMPLES
+#
 #   zrun vim file.txt.gz       Open compressed file in vim
 #   zrun diff a.txt.xz b.txt   Diff compressed vs uncompressed
 #   zrun wc -l *.log.zst       Word count on multiple compressed files
 #
-# Symlink usage:
+# SYMLINK USAGE
+#
 #   ln -s zrun zvim            Then: zvim file.gz
 
 set -euo pipefail

@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
-# killtree - Kill a process and all its descendants
+# killtree — Kill a process and all its descendants
 #
-# Usage:
+# WHAT IT DOES
+#
+# Sends SIGKILL to a process and all its descendants (children,
+# grandchildren, etc). Uses pdsc to find the process tree.
+#
+# USAGE
+#
 #   killtree PID
+#
+# EXAMPLES
+#
+#   killtree 12345      # kill process 12345 and all children
+#   killtree $$         # kill current shell tree (careful!)
+#
+# DEPENDENCIES
+#
+#   pdsc
 
 has_pid() { [[ -n $1 ]]; }
 has_pid "$1" || { echo "usage: killtree PID" >&2; exit 1; }

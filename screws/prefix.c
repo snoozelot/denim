@@ -1,6 +1,24 @@
 #!/usr/bin/env -S ccraft
-// prefix - Prefix every line of input with a given string
-// Usage: prefix [-p prefix] [prefix]
+// prefix — Prefix every line of input with a given string
+//
+// WHAT IT DOES
+//
+// Reads stdin and outputs each line prefixed with a given string.
+// Useful for log formatting, indentation, or marking output.
+//
+// USAGE
+//
+//   prefix [-p PREFIX] [PREFIX]
+//
+// OPTIONS
+//
+//   -p PREFIX   Use PREFIX (allows '-h' as prefix without triggering help)
+//   -h          Show help
+//
+// EXAMPLES
+//
+//   echo -e "foo\nbar" | prefix ">> "    # >> foo\n>> bar
+//   cat log.txt | prefix "[app] "        # prefix each line
 
 #include <stdio.h>
 #include <unistd.h>

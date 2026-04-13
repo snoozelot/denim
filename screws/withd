@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# withd - Execute Command in Directory with Status Output
+# withd — Execute Command in Directory with Status Output
+#
+# WHAT IT DOES
 #
 # Run a command in a specified directory, capture output, and display
 # colored exit status. Useful for parallel batch operations.
 #
-# Usage:
+# USAGE
+#
 #   withd [OPTIONS] DIRECTORY COMMAND [ARGS...]
 #
-# Presets (shorthand, can combine with fine-tuning):
+# PRESETS (shorthand, can combine with fine-tuning)
+#
 #   -q, --quiet       Status only
 #                       --status=yes --stdout=no --stderr=no
 #   -v, --verbose     Status + labeled stdout/stderr
@@ -18,24 +22,28 @@
 # Default:            Quiet unless failure
 #                       --status=yes --stdout=fail --stderr=fail
 #
-# Fine-tuning:
+# FINE-TUNING
+#
 #   --status=yes|no|fail            Exit status line
 #   --stdout=labeled|plain|fail|no  Stdout handling
 #   --stderr=labeled|plain|fail|no  Stderr handling
 #
-# Modes:
+# MODES
+#
 #   labeled  Always show, with labels    e.g. "/tmp [stdout] hello"
 #   fail     Like labeled, on failure only
 #   plain    Always show, no labels      e.g. "hello"
 #   no       Suppress entirely
 #
-# Other:
+# OTHER
+#
 #   -n, --dry-run     Show what would run without executing
 #   --no-color        Disable colors (auto if not tty)
 #   --timestamped     Add timestamps to labels
 #   -h, --help        Show this help
 #
-# Examples:
+# EXAMPLES
+#
 #   withd /tmp pwd
 #   withd /tmp 'ls | wc'
 #   withd -n /tmp 'rm -rf *'

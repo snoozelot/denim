@@ -1,15 +1,19 @@
 #!/bin/bash
-# cyclines - permute input lines via cycle notation
+# cyclines — permute input lines via cycle notation
+#
+# WHAT IT DOES
 #
 # Rearranges input lines using cycle notation where [N M ...] means:
 # line at position N moves to position M, etc.
 #
-# Usage:
-#   cyclines [N M ...] < input
+# USAGE
 #
-# Examples:
-#   cyclines '[' 1 2 ']' '[' 3 4 ']'  # swap lines 1↔2, 3↔4
-#   cyclines '[' 1 2 3 ']'            # rotate: 1→2, 2→3, 3→1
+#   cyclines [ N M ... ] < input
+#
+# EXAMPLES
+#
+#   cyclines [ 1 2 ] [ 3 4 ]  # swap lines 1↔2, 3↔4
+#   cyclines [ 1 2 3 ]        # rotate: 1→2, 2→3, 3→1
 set -euo pipefail
 
 PERM=()

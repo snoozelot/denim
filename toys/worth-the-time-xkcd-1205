@@ -1,26 +1,40 @@
 #!/usr/bin/env bash
-# worth-the-time-xkcd-1205 - calculate if automation is worth the time
+# worth-the-time-xkcd-1205 — calculate if automation is worth the time
+#
+# WHAT IT DOES
 #
 # How long can you work on making a routine task more efficient before
 # you're spending more time than you save? Given any 3 of 5 parameters,
 # calculates the remaining 2.
 #
-# Parameters:
+# PARAMETERS
+#
 #   D = task duration        time to perform task manually once
 #   I = recurrence interval  how often the task occurs
 #   T = projection timerange time period to project over
 #   S = saved                total time saved (automation budget)
 #   N = occurrences          how many times task occurs
 #
-# Relationships: N = T / I,  S = D * N
+# RELATIONSHIPS
 #
-# Usage:
+#   N = T / I,  S = D * N
+#
+# USAGE
+#
 #   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --projection-timerange 1y
 #   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --saved 8h
 #
-# Dependencies: bc, bash 4.3+
+# EXAMPLES
 #
-# References:
+#   worth-the-time-xkcd-1205 -D 5m -I 1d -T 1y   # daily 5min task over 1 year
+#   worth-the-time-xkcd-1205 -D 30s -I 1h -S 8h  # how long until 8h saved?
+#
+# DEPENDENCIES
+#
+#   bc, bash 4.3+
+#
+# REFERENCES
+#
 #   https://xkcd.com/1205/
 #   https://www.explainxkcd.com/wiki/index.php/1205:_Is_It_Worth_the_Time%3F
 #   https://erick.rudiak.com/blog/xkcd-1205-inverted/

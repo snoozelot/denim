@@ -1,22 +1,28 @@
 #!/bin/bash
-# pdsc - Process Descendants
+# pdsc — Process Descendants
+#
+# WHAT IT DOES
 #
 # List all descendant PIDs of a process.
 #
-# Usage:
+# USAGE
+#
 #   pdsc [-v] [-b|-d] PID
 #
-# Options:
+# OPTIONS
+#
 #   -v    verbose: show pid, user, start time, command (one process per line)
 #   -b    breadth-first: group by generation/depth
 #   -d    depth-first: group by subtree (default)
 #
-# Example:
+# EXAMPLES
+#
 #   pdsc $$           # descendants of current shell
 #   pdsc -v 1         # descendants of init with details
 #   pdsc -b -v 1      # descendants grouped by generation
 #
-# Reference:
+# REFERENCES
+#
 #   https://unix.stackexchange.com/questions/124127/kill-all-descendant-processes
 
 pid_exists()  { ps -o pid= --pid "$1" >/dev/null 2>&1; }

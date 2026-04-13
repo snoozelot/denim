@@ -1,23 +1,28 @@
 #!/bin/bash
+# cronic — Run commands quietly unless they fail
 #
-# cronic - Run commands quietly unless they fail
-#
-# Usage: cronic LOG_FILE SCRIPT
+# WHAT IT DOES
 #
 # Executes a bash script silently, only producing output if the command
 # fails (non-zero exit). Useful for cron jobs where you only want
 # notifications on failure.
 #
-# Features:
+# USAGE
+#
+#   cronic LOG_FILE SCRIPT
+#
+# HOW IT WORKS
+#
 #   - Captures stdout and stderr separately with timestamps
 #   - Supports placeholders in LOG_FILE: ISOSTAMP, PID, RANDOM
 #   - Logs PWD, ARGV, and EXIT status for debugging
 #   - Temporary files cleaned up automatically
 #   - Exit status of the original command is preserved
 #
-# Example:
-#   cronic /var/log/backup-ISOSTAMP.log /usr/local/bin/backup.sh
+# EXAMPLES
 #
+#   cronic /var/log/backup-ISOSTAMP.log /usr/local/bin/backup.sh
+#   cronic /tmp/db-ISOSTAMP.log 'pg_dump mydb > /backup/db.sql'
 
 set -euo pipefail
 

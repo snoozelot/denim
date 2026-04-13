@@ -1,15 +1,19 @@
 #!/usr/bin/env -S ccraft
-// path-expand - expand shortened paths to full paths
+// path-expand — expand shortened paths to full paths
+//
+// WHAT IT DOES
 //
 // For each directory level, expands a prefix to the full directory name
 // if it uniquely matches exactly one entry. If ambiguous or no match,
 // keeps the original. The reverse of path-shorten.
 //
-// Usage:
+// USAGE
+//
 //   path-expand PATH           - expand single path
 //   ... | path-expand          - expand paths in stdin text
 //
-// Examples:
+// EXAMPLES
+//
 //   path-expand /h/l/bin/bad/parse_number.h
 //   -> /home/luthor/bin/bad/parse_number.h
 //

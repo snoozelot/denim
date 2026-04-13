@@ -1,10 +1,20 @@
 #!/bin/bash
-# spell-number - convert integer to English words
+# spell-number-en — convert integer to English words
 #
-# usage: spell-number <number>
+# WHAT IT DOES
 #
-# Supports integers from 0 to 10^66-1 (vigintillion)
-# Negative numbers supported with "negative" prefix
+# Converts integers to English words. Supports 0 to 10^66-1 (vigintillion).
+# Negative numbers get "negative" prefix.
+#
+# USAGE
+#
+#   spell-number-en <number>
+#
+# EXAMPLES
+#
+#   spell-number-en 42       # forty-two
+#   spell-number-en 1000     # one thousand
+#   spell-number-en -5       # negative five
 
 set -euo pipefail
 

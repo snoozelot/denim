@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# memento-mori-cal - Visualize your life in weeks
+# memento-mori-cal — Visualize your life in weeks
+#
+# WHAT IT DOES
 #
 # Generate an ASCII calendar showing your entire expected lifespan as a grid
 # of weeks. Each row represents a year, each symbol a week of 7 days since
 # birth. Orphan days (years don't divide evenly into weeks) accumulate until
 # they form complete weeks, displayed in the "53rd week" column.
 #
-# Usage:
-#   ./memento-mori-cal YYYY-MM-DD LIFESPAN [PAST] [CURRENT] [FUTURE]
-#   ./memento-mori-cal --birthdate YYYY-MM-DD --lifespan YEARS [--past-symbol X]
+# USAGE
 #
-# Examples:
-#   ./memento-mori-cal 1990-01-01 80
-#   ./memento-mori-cal 1990-01-01 90 '#' '.' '_'
+#   memento-mori-cal YYYY-MM-DD LIFESPAN [PAST] [CURRENT] [FUTURE]
+#   memento-mori-cal --birthdate YYYY-MM-DD --lifespan YEARS [--past-symbol X]
+#
+# EXAMPLES
+#
+#   memento-mori-cal 1990-01-01 80
+#   memento-mori-cal 1990-01-01 90 '#' '.' '_'
 
 # --- Constants ---
 readonly SECS_DAY=86400

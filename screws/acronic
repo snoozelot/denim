@@ -1,8 +1,23 @@
 #!/bin/bash
-# acronic - Run cronic asynchronously in background, fully detached
+# acronic — Run cronic asynchronously in background, fully detached
 #
-# Usage: acronic COMMAND [ARGS...]
+# WHAT IT DOES
 #
-# Runs cronic (silent unless fail) via setsid, completely detached from terminal.
+# Runs a command via cronic (which suppresses output unless the command fails),
+# completely detached from the terminal using setsid. The command continues
+# running even after the terminal closes.
+#
+# USAGE
+#
+#   acronic COMMAND [ARGS...]
+#
+# EXAMPLES
+#
+#   acronic backup.sh /data      # run backup silently in background
+#   acronic rsync -av src/ dst/  # background sync, log only on failure
+#
+# DEPENDENCIES
+#
+#   cronic, setsid
 
 setsid cronic "$@" &>/dev/null &

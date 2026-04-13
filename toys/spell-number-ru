@@ -1,12 +1,23 @@
 #!/bin/bash
-# spell-number-ru - convert integer to Russian words
+# spell-number-ru — convert integer to Russian words
 #
-# usage: spell-number-ru <number>
+# WHAT IT DOES
 #
-# Supports integers from 0 to 10^66-1
-# Negative numbers supported with "МИНУС" prefix
+# Converts integers to Russian words. Supports 0 to 10^66-1.
+# Negative numbers get "МИНУС" prefix.
 #
-# Russian number rules:
+# USAGE
+#
+#   spell-number-ru <number>
+#
+# EXAMPLES
+#
+#   spell-number-ru 42       # сорок два
+#   spell-number-ru 1000     # одна тысяча
+#   spell-number-ru -5       # МИНУС пять
+#
+# RUSSIAN NUMBER RULES
+#
 # - 40 = сорок (irregular), 90 = девяносто (irregular)
 # - 100 = сто, 200 = двести, 300 = триста, 400 = четыреста
 # - тысяча/миллион etc. require grammatical agreement (1/2-4/5+)
