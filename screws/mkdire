@@ -1,0 +1,60 @@
+#!/bin/bash
+# mkdire — Create parent directories for file arguments, then execute command
+#
+# WHAT IT DOES
+#
+# Ensures parent directories exist before running a command that creates files.
+# Useful for wrapping commands that don't create intermediate directories.
+#
+# Arguments ending with / are treated as directories and created fully.
+# Other arguments have only their parent directory created.
+#
+# USAGE
+#
+#   mkdire [-n] COMMAND [ARGS...]
+#
+# OPTIONS
+#
+#   -n    Dry-run mode: print what would be done without executing
+#
+# EXAMPLES
+#
+#   mkdire touch /path/to/new/dir/file.txt
+#   mkdire cp source.txt /deep/nested/path/dest.txt
+#   mkdire mv file.txt /new/directory/            # trailing / = create dir
+#   mkdire -n mv file.txt /nonexistent/path/renamed.txt
+#
+
+usage() { sed -n '1d; /^[^#]/q; s/^# \?//p' "$0" >&2; exit "${1:-0}"; }
+
+DRYRUN=false
+[[ "$1" == "-h" || "$1" == "--help" ]] && usage
+[[ "$1" == "-n" ]] && { DRYRUN=true; shift; }
+[[ $# -eq 0 ]] && usage 1
+
+mkdir_p() {
+    if $DRYRUN; then
+        echo "[dry-run] mkdir -p $1"
+    else
+        mkdir -p "$1"
+    fi
+}
+
+DASHDASH=false
+for ARG in "$@"; do
+    [[ "$ARG" == "--" ]] && { DASHDASH=true; continue; }
+    $DASHDASH || [[ "$ARG" != -* ]] || continue
+
+    if [[ "$ARG" == */ ]]; then
+        [[ -d "$ARG" ]] || mkdir_p "$ARG"
+    else
+        PARENT=$(dirname "$ARG")
+        [[ -d "$PARENT" ]] || mkdir_p "$PARENT"
+    fi
+done
+
+if $DRYRUN; then
+    echo "[dry-run] $*"
+else
+    exec "$@"
+fi
