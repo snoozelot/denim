@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# cidr-subnet — Calculate subnet address within CIDR prefix (Tofu/Terraform compatible)
+#
+# WHAT IT DOES
+#
+# Implements cidrsubnet(prefix, newbits, netnum) from OpenTofu.
+# Extends a CIDR prefix by newbits and returns the netnum-th subnet.
+#
+# USAGE
+#
+#   cidr-subnet PREFIX NEWBITS NETNUM
+#
+# EXAMPLES
+#
+#   cidr-subnet 10.0.0.0/16 8 0     → 10.0.0.0/24
+#   cidr-subnet 10.0.0.0/16 8 1     → 10.0.1.0/24
+#   cidr-subnet 172.16.0.0/12 4 2   → 172.18.0.0/16
+#   cidr-subnet fd00::/48 16 1     → fd00:0:0:1::/64
+
+set -euo pipefail
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+IPV4_BITS=32
+IPV6_BITS=128
+IPV6_GROUPS=8
+BITS_PER_NIBBLE=4
+IPV6_HEX_LEN=32
+BASH_SAFE_BITS=63
+MIN_COMPRESS_RUN=2
+
+# ============================================================================
+# Interface
+# ============================================================================
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: cidr-subnet PREFIX NEWBITS NETNUM
+
+Calculate subnet address within CIDR prefix (Tofu/Terraform compatible).
+
+Arguments:
+  PREFIX   Base network in CIDR notation (e.g., 10.0.0.0/16 or fd00::/48)
+  NEWBITS  Number of additional network bits for the subnet
+  NETNUM   Subnet number to calculate (0-indexed)
+
+Examples:
+  cidr-subnet 10.0.0.0/16 8 0     → 10.0.0.0/24
+  cidr-subnet 10.0.0.0/16 8 1     → 10.0.1.0/24
+  cidr-subnet 172.16.0.0/12 4 2   → 172.18.0.0/16
+  cidr-subnet fd00::/48 16 1      → fd00:0:0:1::/64
+EOF
+    exit 1
+}
+
+has_arguments() { [[ $# -ge 3 ]]; }
+
+# ============================================================================
+# Predicates
+# ============================================================================
+
+is_ipv6()               { [[ $1 == *:* ]]; }
+is_compressed_ipv6()    { [[ $1 == *::* ]]; }
+has_cidr_slash()        { [[ $1 == */* ]]; }
+is_unsigned_int()       { [[ $1 =~ ^[0-9]+$ ]]; }
+is_zero()               { [[ $1 -eq 0 ]]; }
+fits_in_bash()          { [[ $1 -lt $BASH_SAFE_BITS ]]; }
+worth_compressing() { [[ $1 -ge $MIN_COMPRESS_RUN ]]; }
+has_subnet_offset()     { [[ $1 -gt 0 && $2 -gt 0 ]]; }
+
+prefix_fits() {
+    local BITS=$1 NEWBITS=$2 MAX=$3
+    [[ $((BITS + NEWBITS)) -le $MAX ]]
+}
+
+netnum_fits() {
+    local NETNUM=$1 MAX=$2
+    [[ $NETNUM -le $MAX ]]
+}
+
+max_netnum() {
+    local BITS=$1
+    echo $(( (1 << BITS) - 1 ))
+}
+
+# ============================================================================
+# IPv4 operations
+# ============================================================================
+
+ipv4_parse() {
+    local ADDR=$1
+    local IFS='.'
+    local -a O
+
+    read -ra O <<< "$ADDR"
+    echo $(( (O[0] << 24) | (O[1] << 16) | (O[2] << 8) | O[3] ))
+}
+
+ipv4_format() {
+    local N=$1
+
+    printf '%d.%d.%d.%d' \
+        $(( (N >> 24) & 0xff )) \
+        $(( (N >> 16) & 0xff )) \
+        $(( (N >> 8) & 0xff )) \
+        $(( N & 0xff ))
+}
+
+ipv4_apply_mask() {
+    local ADDR=$1 BITS=$2
+    local MASK=$(( 0xffffffff << (IPV4_BITS - BITS) ))
+
+    echo $(( ADDR & MASK ))
+}
+
+ipv4_set_subnet() {
+    local BASE=$1 NEWPREFIX=$2 NETNUM=$3
+    local SHIFT=$((IPV4_BITS - NEWPREFIX))
+
+    echo $(( BASE | (NETNUM << SHIFT) ))
+}
+
+# ============================================================================
+# IPv6 operations
+# ============================================================================
+
+ipv6_expand() {
+    local ADDR=$1 MISSING I
+    local -a LEFT RIGHT PARTS
+
+    if is_compressed_ipv6 "$ADDR"; then
+        IFS=':' read -ra LEFT <<< "${ADDR%%::*}"
+        IFS=':' read -ra RIGHT <<< "${ADDR#*::}"
+        MISSING=$(( IPV6_GROUPS - ${#LEFT[@]} - ${#RIGHT[@]} ))
+        PARTS=("${LEFT[@]}")
+        for ((I = 0; I < MISSING; I++)); do
+            PARTS+=("0")
+        done
+        PARTS+=("${RIGHT[@]}")
+    else
+        IFS=':' read -ra PARTS <<< "$ADDR"
+    fi
+
+    for I in "${!PARTS[@]}"; do
+        printf '%04x' "0x${PARTS[I]:-0}"
+    done
+}
+
+ipv6_find_zero_run() {
+    local -n PARTS_REF=$1
+    local BEST_START=-1 BEST_LEN=0
+    local CUR_START=-1 CUR_LEN=0
+    local I
+
+    for I in "${!PARTS_REF[@]}"; do
+        if [[ ${PARTS_REF[I]} == "0" ]]; then
+            [[ $CUR_START -lt 0 ]] && CUR_START=$I
+            ((CUR_LEN++))
+        else
+            if [[ $CUR_LEN -gt $BEST_LEN ]]; then
+                BEST_START=$CUR_START
+                BEST_LEN=$CUR_LEN
+            fi
+            CUR_START=-1
+            CUR_LEN=0
+        fi
+    done
+    if [[ $CUR_LEN -gt $BEST_LEN ]]; then
+        BEST_START=$CUR_START
+        BEST_LEN=$CUR_LEN
+    fi
+
+    echo "$BEST_START $BEST_LEN"
+}
+
+ipv6_compress() {
+    local HEX=$1 I OUT=""
+    local -a PARTS
+
+    for ((I = 0; I < IPV6_GROUPS; I++)); do
+        PARTS[I]=$(printf '%x' "0x${HEX:$((I * BITS_PER_NIBBLE)):$BITS_PER_NIBBLE}")
+    done
+
+    local RUN_INFO BEST_START BEST_LEN
+    RUN_INFO=$(ipv6_find_zero_run PARTS)
+    read -r BEST_START BEST_LEN <<< "$RUN_INFO"
+
+    if ! worth_compressing "$BEST_LEN"; then
+        for I in "${!PARTS[@]}"; do
+            [[ $I -gt 0 ]] && OUT+=":"
+            OUT+="${PARTS[I]}"
+        done
+    else
+        for ((I = 0; I < BEST_START; I++)); do
+            [[ $I -gt 0 ]] && OUT+=":"
+            OUT+="${PARTS[I]}"
+        done
+        OUT+="::"
+        for ((I = BEST_START + BEST_LEN; I < IPV6_GROUPS; I++)); do
+            [[ $I -gt $((BEST_START + BEST_LEN)) ]] && OUT+=":"
+            OUT+="${PARTS[I]}"
+        done
+    fi
+    echo "$OUT"
+}
+
+ipv6_apply_mask() {
+    local HEX=$1 POS=$2
+    local CHAR_POS=$((POS / BITS_PER_NIBBLE))
+    local BIT_OFF=$((POS % BITS_PER_NIBBLE))
+    local RESULT="${HEX:0:$CHAR_POS}"
+
+    if [[ $BIT_OFF -gt 0 ]]; then
+        local NIBBLE="${HEX:$CHAR_POS:1}"
+        local VAL=$((0x$NIBBLE))
+        local MASK=$(( (0xf << (BITS_PER_NIBBLE - BIT_OFF)) & 0xf ))
+        RESULT+=$(printf '%x' $((VAL & MASK)))
+    fi
+
+    while [[ ${#RESULT} -lt $IPV6_HEX_LEN ]]; do
+        RESULT+="0"
+    done
+    echo "$RESULT"
+}
+
+ipv6_set_subnet() {
+    local HEX=$1 POS=$2 NBITS=$3 NETNUM=$4
+    local CHAR_POS=$((POS / BITS_PER_NIBBLE))
+    local BIT_OFF=$((POS % BITS_PER_NIBBLE))
+    local END_BIT=$((POS + NBITS))
+    local END_CHAR=$(( (END_BIT + BITS_PER_NIBBLE - 1) / BITS_PER_NIBBLE ))
+    local WORK_CHARS=$((END_CHAR - CHAR_POS))
+
+    local BEFORE="${HEX:0:$CHAR_POS}"
+    local WORK="${HEX:$CHAR_POS:$WORK_CHARS}"
+    local AFTER="${HEX:$END_CHAR}"
+
+    local WORK_BITS=$((WORK_CHARS * BITS_PER_NIBBLE))
+    local SHIFT=$((WORK_BITS - BIT_OFF - NBITS))
+
+    local RESULT
+    RESULT=$(dc -e "16 o 16 i ${WORK^^} 10 i 2 $SHIFT ^ $NETNUM * + p" \
+        | tr -d '\\\n' | tr '[:upper:]' '[:lower:]')
+
+    while [[ ${#RESULT} -lt $WORK_CHARS ]]; do
+        RESULT="0$RESULT"
+    done
+
+    echo "${BEFORE}${RESULT}${AFTER}"
+}
+
+cidr_subnet_v4() {
+    local PREFIX=$1 NEWBITS=$2 NETNUM=$3
+    local ADDR=${PREFIX%/*}
+    local BITS=${PREFIX#*/}
+    local NEWPREFIX=$((BITS + NEWBITS))
+
+    prefix_fits "$BITS" "$NEWBITS" "$IPV4_BITS" \
+        || die "Error: prefix $BITS + newbits $NEWBITS = $NEWPREFIX exceeds $IPV4_BITS"
+
+    local MAX
+    MAX=$(max_netnum "$NEWBITS")
+    netnum_fits "$NETNUM" "$MAX" \
+        || die "Error: netnum $NETNUM exceeds maximum $MAX for $NEWBITS bits"
+
+    local BASE RESULT
+    BASE=$(ipv4_parse "$ADDR")
+    BASE=$(ipv4_apply_mask "$BASE" "$BITS")
+    RESULT=$(ipv4_set_subnet "$BASE" "$NEWPREFIX" "$NETNUM")
+
+    printf '%s/%d\n' "$(ipv4_format "$RESULT")" "$NEWPREFIX"
+}
+
+cidr_subnet_v6() {
+    local PREFIX=$1 NEWBITS=$2 NETNUM=$3
+    local ADDR=${PREFIX%/*}
+    local BITS=${PREFIX#*/}
+    local NEWPREFIX=$((BITS + NEWBITS))
+
+    prefix_fits "$BITS" "$NEWBITS" "$IPV6_BITS" \
+        || die "Error: prefix $BITS + newbits $NEWBITS = $NEWPREFIX exceeds $IPV6_BITS"
+
+    if is_zero "$NEWBITS"; then
+        is_zero "$NETNUM" || die "Error: netnum must be 0 when newbits is 0"
+    elif fits_in_bash "$NEWBITS"; then
+        local MAX
+        MAX=$(max_netnum "$NEWBITS")
+        netnum_fits "$NETNUM" "$MAX" \
+            || die "Error: netnum $NETNUM exceeds maximum $MAX for $NEWBITS bits"
+    fi
+
+    local HEX
+    HEX=$(ipv6_expand "$ADDR")
+    HEX=$(ipv6_apply_mask "$HEX" "$BITS")
+
+    if has_subnet_offset "$NEWBITS" "$NETNUM"; then
+        HEX=$(ipv6_set_subnet "$HEX" "$BITS" "$NEWBITS" "$NETNUM")
+    fi
+
+    printf '%s/%d\n' "$(ipv6_compress "$HEX")" "$NEWPREFIX"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    has_arguments "$@" || usage
+
+    local PREFIX=$1 NEWBITS=$2 NETNUM=$3
+
+    has_cidr_slash "$PREFIX" \
+        || die "Error: PREFIX must be in CIDR notation (e.g., 10.0.0.0/16)"
+    is_unsigned_int "$NEWBITS" \
+        || die "Error: NEWBITS must be a non-negative integer"
+    is_unsigned_int "$NETNUM" \
+        || die "Error: NETNUM must be a non-negative integer"
+
+    if is_ipv6 "$PREFIX"; then
+        cidr_subnet_v6 "$PREFIX" "$NEWBITS" "$NETNUM"
+    else
+        cidr_subnet_v4 "$PREFIX" "$NEWBITS" "$NETNUM"
+    fi
+}
+
+main "$@"

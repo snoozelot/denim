@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# cidr-contains — Check if one CIDR block contains another
+#
+# WHAT IT DOES
+#
+# Tests whether CONTAINER contains INNER by comparing network prefixes.
+# CONTAINER contains INNER when INNER's prefix starts with CONTAINER's prefix.
+#
+# USAGE
+#
+#   cidr-contains CONTAINER INNER
+#
+# EXIT CODES
+#
+#   0 - CONTAINER contains INNER
+#   1 - CONTAINER does not contain INNER
+#
+# EXAMPLES
+#
+#   cidr-contains 10.0.0.0/16 10.0.1.0/24  # exits 0 (true)
+#   cidr-contains 10.0.1.0/24 10.0.0.0/16  # exits 1 (false)
+
+set -euo pipefail
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+BITS_PER_BYTE=8
+BYTES_PER_IPV4=4
+BITS_PER_IPV4=$((BITS_PER_BYTE * BYTES_PER_IPV4))
+MAX_BYTE_VALUE=255
+
+# ============================================================================
+# Interface
+# ============================================================================
+
+die() {
+    printf '[ERROR] %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+}
+
+usage() {
+    echo "Usage: ${0##*/} CONTAINER INNER"
+    echo "Check whether CONTAINER contains INNER"
+}
+
+has_arguments() { [[ $# -ge 2 ]]; }
+
+# ============================================================================
+# Predicates
+# ============================================================================
+
+is_unsigned_int()    { [[ $1 =~ ^[0-9]+$ ]]; }
+is_valid_byte()      { is_unsigned_int "$1" && (( $1 <= MAX_BYTE_VALUE )); }
+is_valid_mask()      { is_unsigned_int "$1" && (( $1 <= BITS_PER_IPV4 )); }
+prefix_starts_with() { [[ $1 == "$2"* ]]; }
+
+is_cidr() {
+    local CIDR=$1
+    local IP MASK
+    local -a BYTES
+
+    IFS='/' read -r IP MASK <<< "$CIDR"
+    IFS='.' read -ra BYTES <<< "$IP"
+
+    [[ ${#BYTES[@]} -eq $BYTES_PER_IPV4 ]] || return 1
+    is_valid_byte "${BYTES[0]}" || return 1
+    is_valid_byte "${BYTES[1]}" || return 1
+    is_valid_byte "${BYTES[2]}" || return 1
+    is_valid_byte "${BYTES[3]}" || return 1
+    is_valid_mask "${MASK:-$BITS_PER_IPV4}" || return 1
+}
+
+# ============================================================================
+# Core operations
+# ============================================================================
+
+ip_to_binary() {
+    local IP=$1
+    local -a BYTES
+
+    IFS='.' read -ra BYTES <<< "$IP"
+    printf '%08d%08d%08d%08d' \
+        $(echo "obase=2; ${BYTES[0]}" | bc) \
+        $(echo "obase=2; ${BYTES[1]}" | bc) \
+        $(echo "obase=2; ${BYTES[2]}" | bc) \
+        $(echo "obase=2; ${BYTES[3]}" | bc)
+}
+
+network_prefix() {
+    local CIDR=$1
+    local IP MASK BINARY
+
+    IFS='/' read -r IP MASK <<< "$CIDR"
+    MASK=${MASK:-$BITS_PER_IPV4}
+    BINARY=$(ip_to_binary "$IP")
+    echo "${BINARY:0:$MASK}"
+}
+
+cidr_contains() {
+    local CONTAINER=$1
+    local INNER=$2
+
+    prefix_starts_with "$(network_prefix "$INNER")" "$(network_prefix "$CONTAINER")"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    has_arguments "$@" || die "requires two arguments"
+
+    local CONTAINER=$1
+    local INNER=$2
+
+    is_cidr "$CONTAINER" || die "CONTAINER not a valid CIDR: $CONTAINER"
+    is_cidr "$INNER" || die "INNER not a valid CIDR: $INNER"
+
+    cidr_contains "$CONTAINER" "$INNER"
+}
+
+main "$@"
