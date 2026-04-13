@@ -1,0 +1,128 @@
+#!/bin/bash
+# cpstamped — Copy file or directory with Unix timestamp suffix
+#
+# WHAT IT DOES
+#
+# Creates PATH.EPOCH backup for each argument (e.g., config.1735689600).
+# Symlinks are dereferenced — backup contains actual content.
+#
+# USAGE
+#
+#   cpstamped [-l|-n] PATH...
+#
+# OPTIONS
+#
+#   -l         List existing backups with human-readable timestamps
+#   -n         Dry run — show what would be copied without copying
+#   -h, --help Show this help
+#
+# EXAMPLES
+#
+#   cpstamped config.yaml           # creates config.yaml.1712345678
+#   cpstamped -l config.yaml        # list all backups of config.yaml
+#   cpstamped -n /etc/nginx/        # dry-run backup of directory
+
+set -euo pipefail
+
+readonly TIMESTAMP_GLOB='.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+
+# ============================================================================
+# Predicates
+# ============================================================================
+
+has_arguments()  { [[ $# -gt 0 ]]; }
+is_dryrun()      { [[ -n "${DRYRUN:-}" ]]; }
+is_list()        { [[ -n "${LIST:-}" ]]; }
+exists()         { [[ -e $1 ]]; }
+is_directory()   { [[ -d $1 ]]; }
+has_timestamp()  { [[ $1 =~ \.([0-9]{10})$ ]]; }
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+usage()            { sed -n '2,/^$/{ s/^# \?//p }' "$0"; }
+file_mtime()       { stat -c %Y "$1" 2>/dev/null || echo 0; }
+format_timestamp() { date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "invalid"; }
+
+# ============================================================================
+# List mode
+# ============================================================================
+
+list_backups() {
+    local ARG
+    local SRC
+    local BACKUP
+    local STAMP
+    local FORMATTED
+
+    for ARG in "$@"; do
+        SRC=$(realpath -s "$ARG")
+        for BACKUP in "$SRC" "$SRC"$TIMESTAMP_GLOB; do
+            exists "$BACKUP" || continue
+            if has_timestamp "$BACKUP"; then
+                STAMP=${BASH_REMATCH[1]}
+            else
+                STAMP=$(file_mtime "$BACKUP")
+            fi
+            FORMATTED=$(format_timestamp "$STAMP")
+            printf '%s\t%s\t%s\n' "$STAMP" "$BACKUP" "$FORMATTED"
+        done
+    done | sort -n | cut -f2- | column -t -s $'\t'
+}
+
+# ============================================================================
+# Copy mode
+# ============================================================================
+
+# Trailing slash on directory source: copy contents into dest, not dir-in-dir
+copy_backup() {
+    local SRC=$1
+    local SNAPSHOT=$2
+    local FLAGS=$3
+    local RESOLVED
+
+    RESOLVED=$(realpath "$SRC")
+
+    if is_directory "$RESOLVED"; then
+        ( set -x; rsync $FLAGS --exclude '.terraform' -- "$SRC/" "$SNAPSHOT" )
+    else
+        ( set -x; rsync $FLAGS --exclude '.terraform' -- "$SRC" "$SNAPSHOT" )
+    fi
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    local ARG
+    local SRC
+    local SNAPSHOT
+    local STAMP
+    local FLAGS
+    local RC=0
+
+    [[ ${1:-} == -h || ${1:-} == --help ]] && { usage; exit 0; }
+    [[ ${1:-} == -l ]] && { LIST=1; shift; }
+    [[ ${1:-} == -n ]] && { DRYRUN=1; shift; }
+    has_arguments "$@" || { usage; exit 0; }
+
+    if is_list; then list_backups "$@"; exit 0; fi
+
+    FLAGS=-aL
+    if is_dryrun; then FLAGS=-aLn; fi
+
+    STAMP=$(TZ=UTC date '+%s')
+
+    for ARG in "$@"; do
+        SRC=$(realpath -s "$ARG")
+        SNAPSHOT="${SRC}.${STAMP}"
+        exists "$SNAPSHOT" && continue
+        copy_backup "$SRC" "$SNAPSHOT" "$FLAGS" || RC=$?
+    done
+
+    exit $RC
+}
+
+main "$@"
