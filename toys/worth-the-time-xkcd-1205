@@ -1,37 +1,46 @@
 #!/usr/bin/env bash
-# worth-the-time-xkcd-1205 — calculate if automation is worth the time
+# worth-the-time-xkcd-1205 — Is automating a task worth the time?
 #
 # WHAT IT DOES
 #
-# How long can you work on making a routine task more efficient before
-# you're spending more time than you save? Given any 3 of 5 parameters,
-# calculates the remaining 2.
+# Answers the xkcd 1205 question: how long can you work on automating a
+# routine task before you spend more time than you save? Given any 3 of
+# 5 parameters (task duration, recurrence interval, projection timerange,
+# time saved, occurrences), calculates the remaining 2 and prints all 5.
 #
-# PARAMETERS
+# HOW IT WORKS
 #
-#   D = task duration        time to perform task manually once
-#   I = recurrence interval  how often the task occurs
-#   T = projection timerange time period to project over
-#   S = saved                total time saved (automation budget)
-#   N = occurrences          how many times task occurs
-#
-# RELATIONSHIPS
-#
-#   N = T / I,  S = D * N
+# Two equations govern the system: N = T / I and S = D * N. Two solver
+# passes resolve all valid 3-parameter combinations. Time values are
+# parsed from human notation (5m, 1h30m, 2d) using an associative map
+# of unit names to seconds; arithmetic runs via awk.
 #
 # USAGE
 #
-#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --projection-timerange 1y
-#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --saved 8h
+#   worth-the-time-xkcd-1205 OPTIONS
+#
+# OPTIONS
+#
+#   --task-duration <time>         (D) Time to perform the task once
+#   --recurrence-interval <time>   (I) How often the task occurs
+#   --projection-timerange <time>  (T) Time period to project over
+#   --saved <time>                 (S) Total time saved
+#   --occurrences <number>         (N) Number of task occurrences
+#   -h, --help                     Show this help
+#
+#   Time format: number+unit pairs, concatenated (5m, 1h30m, 2d).
+#   Units: y/year/years  w/week/weeks  d/day/days
+#          h/hour/hours  m/min/minute/minutes  s/sec/second/seconds
 #
 # EXAMPLES
 #
-#   worth-the-time-xkcd-1205 -D 5m -I 1d -T 1y   # daily 5min task over 1 year
-#   worth-the-time-xkcd-1205 -D 30s -I 1h -S 8h  # how long until 8h saved?
+#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --projection-timerange 1y
+#   worth-the-time-xkcd-1205 --task-duration 5m --recurrence-interval 1d --saved 8h
+#   worth-the-time-xkcd-1205 --task-duration 30s --recurrence-interval 1h --saved 8h
 #
 # DEPENDENCIES
 #
-#   bc, bash 4.3+
+#   awk, bash 4.3+
 #
 # REFERENCES
 #
@@ -43,10 +52,19 @@ set -euo pipefail
 
 # --- Constants ---
 
-readonly SECS_PER=(31536000 604800 86400 3600 60 1)  # year week day hour minute second
+# Unit name (any spelling) → seconds.  One place to add a unit.
+declare -rA UNITS=(
+    [y]=31536000  [year]=31536000   [years]=31536000
+    [w]=604800    [week]=604800     [weeks]=604800
+    [d]=86400     [day]=86400       [days]=86400
+    [h]=3600      [hour]=3600       [hours]=3600
+    [m]=60        [min]=60          [minute]=60       [minutes]=60
+    [s]=1         [sec]=1           [second]=1        [seconds]=1
+)
+
+# Ordered display columns, largest first.
+readonly SECS_PER=(31536000 604800 86400 3600 60 1)
 readonly UNIT=(y w d h m s)
-readonly UNIT_SING=(year week day hour minute second)
-readonly UNIT_PLUR=(years weeks days hours minutes seconds)
 
 readonly LABEL_WIDTH=22
 
@@ -73,14 +91,8 @@ all_solved()       { is_set D && is_set I && is_set T && is_set S && is_set N; }
 
 unit_to_seconds() {
     local U="${1,,}"
-    local K
-
-    for K in "${!UNIT[@]}"; do
-        [[ $U == "${UNIT[$K]}" ]]      && { echo "${SECS_PER[$K]}"; return 0; }
-        [[ $U == "${UNIT_SING[$K]}" ]] && { echo "${SECS_PER[$K]}"; return 0; }
-        [[ $U == "${UNIT_PLUR[$K]}" ]] && { echo "${SECS_PER[$K]}"; return 0; }
-    done
-    return 1
+    [[ -v UNITS[$U] ]] || return 1
+    echo "${UNITS[$U]}"
 }
 
 parse_time() {
@@ -111,7 +123,7 @@ parse_number() {
 # --- Solver ---
 # Two equations: N = T/I, S = D*N. Two passes solves all valid combos.
 
-calc() { echo "scale=10; $1" | bc; }
+calc() { awk "BEGIN { printf \"%.10g\", $1 }"; }
 
 count_params() {
     local C=0
@@ -282,7 +294,6 @@ Examples:
   worth-the-time-xkcd-1205  --task-duration 5m  --recurrence-interval 1d                                         --occurrences 100
   worth-the-time-xkcd-1205  --task-duration 5m                            --projection-timerange 1y  --saved 1d
   worth-the-time-xkcd-1205  --task-duration 5m                            --projection-timerange 1y              --occurrences 365
-  worth-the-time-xkcd-1205  --task-duration 5m                                                       --saved 1h  --occurrences  12
   worth-the-time-xkcd-1205                      --recurrence-interval 2d  --projection-timerange 1y  --saved 1d
   worth-the-time-xkcd-1205                      --recurrence-interval 2d                             --saved 1d  --occurrences  28.8
   worth-the-time-xkcd-1205                                                --projection-timerange 1y  --saved 1d  --occurrences 365
