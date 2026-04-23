@@ -26,6 +26,11 @@ set -euo pipefail
 
 readonly TIMESTAMP_GLOB='.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
 
+EXCLUDE=(
+    .terraform/
+    sessions/
+)
+
 # ============================================================================
 # Predicates
 # ============================================================================
@@ -76,18 +81,27 @@ list_backups() {
 # ============================================================================
 
 # Trailing slash on directory source: copy contents into dest, not dir-in-dir
+exclude_flags() {
+    local ITEM
+    for ITEM in "${EXCLUDE[@]}"; do
+        printf '%s ' "--exclude=$ITEM"
+    done
+}
+
 copy_backup() {
     local SRC=$1
     local SNAPSHOT=$2
     local FLAGS=$3
     local RESOLVED
+    local EXCLUDES
 
     RESOLVED=$(realpath "$SRC")
+    EXCLUDES=$(exclude_flags)
 
     if is_directory "$RESOLVED"; then
-        ( set -x; rsync $FLAGS --exclude '.terraform' -- "$SRC/" "$SNAPSHOT" )
+        ( set -x; rsync $FLAGS $EXCLUDES -- "$SRC/" "$SNAPSHOT" )
     else
-        ( set -x; rsync $FLAGS --exclude '.terraform' -- "$SRC" "$SNAPSHOT" )
+        ( set -x; rsync $FLAGS $EXCLUDES -- "$SRC" "$SNAPSHOT" )
     fi
 }
 
@@ -103,9 +117,9 @@ main() {
     local FLAGS
     local RC=0
 
-    [[ ${1:-} == -h || ${1:-} == --help ]] && { usage; exit 0; }
-    [[ ${1:-} == -l ]] && { LIST=1; shift; }
-    [[ ${1:-} == -n ]] && { DRYRUN=1; shift; }
+    if [[ ${1:-} == -h || ${1:-} == --help ]]; then usage; exit 0; fi
+    if [[ ${1:-} == -l ]]; then LIST=1; shift; fi
+    if [[ ${1:-} == -n ]]; then DRYRUN=1; shift; fi
     has_arguments "$@" || { usage; exit 0; }
 
     if is_list; then list_backups "$@"; exit 0; fi
@@ -118,7 +132,8 @@ main() {
     for ARG in "$@"; do
         SRC=$(realpath -s "$ARG")
         SNAPSHOT="${SRC}.${STAMP}"
-        exists "$SNAPSHOT" && continue
+        exists "$SRC" || { echo "cpstamped: $ARG: No such file or directory" >&2; RC=1; continue; }
+        if exists "$SNAPSHOT"; then continue; fi
         copy_backup "$SRC" "$SNAPSHOT" "$FLAGS" || RC=$?
     done
 

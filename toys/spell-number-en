@@ -12,9 +12,9 @@
 #
 # EXAMPLES
 #
-#   spell-number-en 42       # forty-two
-#   spell-number-en 1000     # one thousand
-#   spell-number-en -5       # negative five
+#   spell-number-en 42       # FORTY-TWO
+#   spell-number-en 1000     # ONE THOUSAND
+#   spell-number-en -5       # NEGATIVE FIVE
 
 set -euo pipefail
 

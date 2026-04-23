@@ -4,7 +4,8 @@
 # WHAT IT DOES
 #
 # Rearranges input lines using cycle notation where [N M ...] means:
-# line at position N moves to position M, etc.
+# line at position N moves to position M, M to the next, and the last
+# position maps back to N.
 #
 # USAGE
 #
@@ -18,83 +19,60 @@ set -euo pipefail
 
 PERM=()
 BUF=()
-MAX=1
-LAST=""
+CYCLE=()
+IN_CYCLE=false
 
-die() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+die()            { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+is_num()         { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
+is_in_cycle()    { [[ "$IN_CYCLE" == true ]]; }
+already_mapped() { [[ -n ${PERM[$1]:-} ]]; }
+has_arguments()  { [[ $# -gt 0 ]]; }
 
-is_num()           { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
-inside_cycle()     { [[ -n $LAST ]]; }
-is_trivial_cycle() { [[ $1 == "$LAST" ]]; }
-already_mapped()   { [[ -n ${PERM[$1]:-} ]]; }
-has_arguments()    { [[ $# -gt 0 ]]; }
+map_cycle() {
+    local LEN=${#CYCLE[@]}
+    [[ $LEN -le 1 ]] && return 0
+    local I
+    local TAIL
 
-handle_close_bracket() {
-    inside_cycle && die "nested cycle at position $POS"
-    return 0
-}
+    for (( I=0; I<LEN-1; I++ )); do
+        if already_mapped "${CYCLE[$I]}"; then die "duplicate position ${CYCLE[$I]}"; fi
+        PERM[${CYCLE[$I]}]=${CYCLE[$((I+1))]}
+    done
 
-handle_open_bracket() {
-    inside_cycle || die "unmatched '[' at position $POS"
-    is_num "$NEXT" || die "expected integer at position $((POS+1))"
-    is_trivial_cycle "$NEXT" && { LAST=""; return 0; }
-    already_mapped "$LAST" && die "collision at position $((POS+1))"
-    PERM[$LAST]=$NEXT
-    LAST=""
-}
-
-handle_chain_element() {
-    is_num "$NEXT" || die "expected integer at position $((POS+1))"
-    already_mapped "$ARG" && die "collision at position $POS"
-    PERM[$ARG]=$NEXT
-}
-
-handle_number() {
-    (( ARG > MAX )) && MAX=$ARG
-    
-    inside_cycle || {
-        [[ "$NEXT" == ']' ]] && { LAST=$ARG; return 0; }
-        die "cycle element missing ']' at position $POS"
-    }
-    
-    handle_chain_element
-}
-
-handle_token() {
-    if [[ "$ARG" == ']' ]]; then
-        handle_close_bracket
-    elif [[ "$ARG" == '[' ]]; then
-        handle_open_bracket
-    elif is_num "$ARG"; then
-        handle_number
-    else
-        die "expected integer, '[', or ']' at position $POS"
-    fi
+    TAIL=${CYCLE[$((LEN-1))]}
+    if already_mapped "$TAIL"; then die "duplicate position $TAIL"; fi
+    PERM[$TAIL]=${CYCLE[0]}
 }
 
 parse_arguments() {
-    local NPOS
-    for (( POS=$#; POS>0; --POS )); do
-        ARG=${!POS}
-        if (( POS < $# )); then
-            NPOS=$((POS+1))
-            NEXT=${!NPOS}
-        else
-            NEXT=""
-        fi
-        handle_token
-    done
-}
+    local POS
+    local ARG
 
-print_buffered_lines() {
-    local FROM=$1 TO=$2
-    for (( J=FROM; J<=TO; ++J )); do
-        [[ -n ${BUF[$J]:-} ]] && printf '%s\n' "${BUF[$J]}"
+    for (( POS=1; POS<=$#; POS++ )); do
+        ARG=${!POS}
+        if [[ "$ARG" == '[' ]]; then
+            if is_in_cycle; then die "nested '[' at position $POS"; fi
+            IN_CYCLE=true
+            CYCLE=()
+        elif [[ "$ARG" == ']' ]]; then
+            is_in_cycle || die "unmatched ']' at position $POS"
+            map_cycle
+            IN_CYCLE=false
+        elif is_num "$ARG"; then
+            is_in_cycle || die "number $ARG outside cycle at position $POS"
+            CYCLE+=("$ARG")
+        else
+            die "expected integer, '[', or ']' at position $POS"
+        fi
     done
+
+    if is_in_cycle; then die "unclosed '['"; fi
 }
 
 validate_permutation() {
-    local TOTAL=$1 POS
+    local TOTAL=$1
+    local POS
+
     for POS in "${!PERM[@]}"; do
         (( POS > TOTAL )) && die "position $POS exceeds input size $TOTAL"
         (( PERM[$POS] > TOTAL )) && die "target ${PERM[$POS]} exceeds input size $TOTAL"
@@ -102,22 +80,35 @@ validate_permutation() {
     return 0
 }
 
+print_buffered_lines() {
+    local FROM=$1
+    local TO=$2
+    local J
+
+    for (( J=FROM; J<=TO; ++J )); do
+        [[ -n ${BUF[$J]:-} ]] && printf '%s\n' "${BUF[$J]}"
+    done
+}
+
 permute_lines() {
-    local ID=0 FLUSH_FROM=1 LINE TARGET HIGHEST=0
+    local ID=0
+    local LINE
+    local TARGET
+    local POS
     local -a LINES=()
-    
+
     while IFS= read -r LINE || [[ -n $LINE ]]; do
         (( ++ID ))
         LINES[$ID]=$LINE
     done
-    
+
     validate_permutation "$ID"
-    
+
     for (( POS=1; POS<=ID; POS++ )); do
         TARGET=${PERM[$POS]:-$POS}
         BUF[$TARGET]=${LINES[$POS]}
     done
-    
+
     print_buffered_lines 1 "$ID"
 }
 
