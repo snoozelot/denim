@@ -757,7 +757,7 @@ type_cpio() {
         extract) cpio -idm -D "$3" < "$ARCHIVE" ;;
         list)    cpio -t       < "$ARCHIVE" ;;
         paths)   cpio -t       < "$ARCHIVE" ;;
-        create)  cpio -o > "$ARCHIVE" ;;
+        create)  find "${@:3}" | cpio -o > "$ARCHIVE" ;;
         test)    cpio -t       < "$ARCHIVE" > /dev/null ;;
     esac
 }

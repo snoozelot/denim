@@ -80,7 +80,6 @@ list_backups() {
 # Copy mode
 # ============================================================================
 
-# Trailing slash on directory source: copy contents into dest, not dir-in-dir
 exclude_flags() {
     local ITEM
     for ITEM in "${EXCLUDE[@]}"; do
@@ -88,6 +87,7 @@ exclude_flags() {
     done
 }
 
+# Trailing slash on directory source: copy contents into dest, not dir-in-dir
 copy_backup() {
     local SRC=$1
     local SNAPSHOT=$2
