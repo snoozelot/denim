@@ -6,6 +6,12 @@
 # Any compressed file arguments are decompressed to temp files, and the
 # command runs with decompressed versions. Temp files are cleaned up after.
 #
+# DEPENDENCIES
+#
+# Requires decompression tools for formats in use: gunzip, bunzip2, xz, zstd,
+# lz4, lzma/lzip, brotli, snzip, bzip3, uncompress, lzop. Missing tools cause
+# runtime errors only if that compression format is used.
+#
 # USAGE
 #
 #   zrun COMMAND [ARGS...]
@@ -40,60 +46,38 @@ trap cleanup EXIT
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-# ============================================================================
-# Decompression
-# ============================================================================
+has_arguments() { [[ $# -ge 1 ]]; }
 
-# Decompress SRC into DEST. Returns 1 if SRC is not a recognized format.
-try_decompress() {
-    local SRC=$1
-    local DEST=$2
-    case "${SRC,,}" in
-        *.gz)   gunzip      -c "$SRC" > "$DEST" ;;
-        *.bz2)  bunzip2     -c "$SRC" > "$DEST" ;;
-        *.xz)   xz         -dc "$SRC" > "$DEST" ;;
-        *.zst)  zstd       -dc "$SRC" > "$DEST" ;;
-        *.lz4)  lz4        -dc "$SRC" > "$DEST" ;;
-        *.lzma) lzma       -dc "$SRC" > "$DEST" ;;
-        *.lz)   lzip       -dc "$SRC" > "$DEST" ;;
-        *.br)   brotli     -dc "$SRC" > "$DEST" ;;
-        *.sz)   snunzip     -c "$SRC" > "$DEST" ;;
-        *.bz3)  bzip3      -dc "$SRC" > "$DEST" ;;
-        *.z)    uncompress  -c "$SRC" > "$DEST" ;;
-        *.lzo)  lzop       -dc "$SRC" > "$DEST" ;;
-        *)      return 1 ;;
-    esac
-}
+invoked_as_symlink() { [[ "$1" == z* && "$1" != "zrun" ]]; }
 
-# ============================================================================
-# Argument processing
-# ============================================================================
-
-process_args() {
-    local ARGS=()
-    local ARG
+# SIDEFF: TEMPFILES, PROCESSED
+decomp() {
+    local FILE=$1
+    local EXT
     local TEMPFILE
 
-    for ARG in "$@"; do
-        if [[ -f "$ARG" ]]; then
-            TEMPFILE=$(mktemp --suffix="-$(basename "${ARG%.*}")")
-            TEMPFILES+=("$TEMPFILE")
-            if try_decompress "$ARG" "$TEMPFILE"; then
-                ARGS+=("$TEMPFILE")
-            else
-                ARGS+=("$ARG")
-            fi
-        else
-            ARGS+=("$ARG")
-        fi
-    done
+    [[ -f "$FILE" ]] || { PROCESSED+=("$FILE"); return 0; }
 
-    printf '%s\0' "${ARGS[@]}"
+    EXT=${FILE##*.}
+    TEMPFILE=$(mktemp)
+    TEMPFILES+=("$TEMPFILE")
+    case "${EXT,,}" in
+        gz)   gunzip -c     < "$FILE" > "$TEMPFILE" ;;
+        bz2)  bunzip2 -c    < "$FILE" > "$TEMPFILE" ;;
+        xz)   xz -dc        < "$FILE" > "$TEMPFILE" ;;
+        zst)  zstd -dc      < "$FILE" > "$TEMPFILE" ;;
+        lz4)  lz4 -dc       < "$FILE" > "$TEMPFILE" ;;
+        lzma) lzma -dc      < "$FILE" > "$TEMPFILE" ;;
+        lz)   lzip -dc      < "$FILE" > "$TEMPFILE" ;;
+        br)   brotli -dc    < "$FILE" > "$TEMPFILE" ;;
+        sz)   snunzip -c    < "$FILE" > "$TEMPFILE" ;;
+        bz3)  bzip3 -dc     < "$FILE" > "$TEMPFILE" ;;
+        z)    uncompress -c < "$FILE" > "$TEMPFILE" ;;
+        lzo)  lzop -dc      < "$FILE" > "$TEMPFILE" ;;
+        *)    rm -f "$TEMPFILE"; PROCESSED+=("$FILE"); return 0 ;;
+    esac
+    PROCESSED+=("$TEMPFILE")
 }
-
-# ============================================================================
-# Main
-# ============================================================================
 
 usage() {
     cat << 'EOF'
@@ -115,16 +99,27 @@ EOF
     exit 1
 }
 
-INVOKED=$(basename "$0")
-if [[ "$INVOKED" == z* && "$INVOKED" != "zrun" ]]; then
-    CMD="${INVOKED#z}"
-else
-    [[ $# -ge 1 ]] || usage
-    CMD=$1
-    shift
-fi
+main() {
+    local CMD
+    local INVOKED
 
-[[ $# -ge 1 ]] || usage
+    INVOKED=$(basename "$0")
+    if invoked_as_symlink "$INVOKED"; then
+        CMD=${INVOKED#z}
+    else
+        has_arguments "$@" || usage
+        CMD=$1
+        shift
+    fi
 
-mapfile -d '' PROCESSED < <(process_args "$@")
-exec "$CMD" "${PROCESSED[@]}"
+    has_arguments "$@" || usage
+
+    PROCESSED=()
+    for ARG in "$@"; do decomp "$ARG"; done
+
+    # Cannot exec: that would replace the shell and skip the EXIT trap, leaking tempfiles.
+    # Run normally; set -e propagates a nonzero exit code, then the trap cleans up.
+    "$CMD" "${PROCESSED[@]}"
+}
+
+main "$@"

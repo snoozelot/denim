@@ -53,6 +53,12 @@
 #                exe (Inno Setup)
 #                cbz cbr cb7 cbt (comic books)
 #                iso (disk images)
+#
+# LIMITATIONS
+#
+#   arc c does not create: cab ace deb rpm exe (extract only)
+#   Bare compressors (gz bz2 xz ...) require a compound extension
+#     (.tar.gz, .tar.xz, ...) for archives with multiple files.
 
 set -euo pipefail
 
@@ -61,11 +67,27 @@ set -euo pipefail
 # ============================================================================
 
 die()              { printf '%s\n' "$*" >&2; exit 1; }
+require_tool()     { command -v "$1" >/dev/null 2>&1 || die "arc: $1 not found — install it"; }
 file_exists()      { [[ -f $1 ]]; }
 path_exists()      { [[ -e $1 ]]; }
 has_arguments()    { [[ $# -gt 0 ]]; }
 single_file_only() { [[ $# -eq 1 ]]; }
 has_files()        { [[ $# -ge 2 ]]; }  # archive + at least one source
+inner_is_tar()     { [[ $1 == tar ]]; }
+
+# Strips extensions for subdirectory naming. Strips one extension;
+# strips a second if inner type is tar (e.g. file.tar.gz -> file).
+subdir_name() {
+    local ARCHIVE=$1
+    local INNER=${2:-}
+    local F="${ARCHIVE##*/}"
+
+    F="${F%.*}"
+    if inner_is_tar "$INNER"; then
+        F="${F%.*}"
+    fi
+    echo "$F"
+}
 
 # ============================================================================
 # Type detection
@@ -113,25 +135,6 @@ detect_type() {
         *.iso)               echo "iso"  ;;
         *)                   die "Unknown archive type: $F" ;;
     esac
-}
-
-# ============================================================================
-# Basename stripping
-# ============================================================================
-
-# Strips exactly the extensions handled during extraction.
-# Always strips one extension; strips a second if INNER is tar
-# (bare compressor over tar, e.g. file.tar.gz -> file).
-subdir_name() {
-    local ARCHIVE=$1
-    local INNER=${2:-}
-    local F="${ARCHIVE##*/}"
-
-    F="${F%.*}"
-    if [[ $INNER == tar ]]; then
-        F="${F%.*}"
-    fi
-    echo "$F"
 }
 
 # ============================================================================
@@ -211,6 +214,7 @@ type_tlz() {
 }
 
 type_tbr() {
+    require_tool brotli
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -226,39 +230,43 @@ type_tbr() {
 # Peek at inner type: if tar, delegate to tar; otherwise single-file op.
 
 type_gz() {
+    require_tool gzip
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -xzf "$ARCHIVE" -C "$3"
             else
-                gzip -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                gzip -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tzf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tzf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -czf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "gz: single file only"
+                single_file_only "${@:3}" || die "gz: multiple files -- use .tar.gz for archives"
                 gzip -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tzf "$ARCHIVE" > /dev/null
             else
                 gzip -t "$ARCHIVE"
@@ -267,39 +275,43 @@ type_gz() {
 }
 
 type_bz2() {
+    require_tool bzip2
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -xjf "$ARCHIVE" -C "$3"
             else
-                bzip2 -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                bzip2 -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tjf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tjf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cjf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "bz2: single file only"
+                single_file_only "${@:3}" || die "bz2: multiple files -- use .tar.bz2 for archives"
                 bzip2 -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tjf "$ARCHIVE" > /dev/null
             else
                 bzip2 -t "$ARCHIVE"
@@ -308,39 +320,43 @@ type_bz2() {
 }
 
 type_xz() {
+    require_tool xz
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -xJf "$ARCHIVE" -C "$3"
             else
-                xz -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                xz -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tJf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tJf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cJf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "xz: single file only"
+                single_file_only "${@:3}" || die "xz: multiple files -- use .tar.xz for archives"
                 xz -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -tJf "$ARCHIVE" > /dev/null
             else
                 xz -t "$ARCHIVE"
@@ -349,39 +365,43 @@ type_xz() {
 }
 
 type_zst() {
+    require_tool zstd
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --zstd -xf "$ARCHIVE" -C "$3"
             else
-                zstd -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                zstd -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --zstd -tf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --zstd -tf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --zstd -cf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "zst: single file only"
+                single_file_only "${@:3}" || die "zst: multiple files -- use .tar.zst for archives"
                 zstd -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --zstd -tf "$ARCHIVE" > /dev/null
             else
                 zstd -t "$ARCHIVE"
@@ -390,39 +410,43 @@ type_zst() {
 }
 
 type_lzma() {
+    require_tool lzma
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzma -xf "$ARCHIVE" -C "$3"
             else
-                lzma -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                lzma -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzma -tf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzma -tf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzma -cf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "lzma: single file only"
+                single_file_only "${@:3}" || die "lzma: multiple files -- use .tar.lzma for archives"
                 lzma -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzma -tf "$ARCHIVE" > /dev/null
             else
                 lzma -t "$ARCHIVE"
@@ -431,39 +455,43 @@ type_lzma() {
 }
 
 type_lz() {
+    require_tool lzip
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzip -xf "$ARCHIVE" -C "$3"
             else
-                lzip -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                lzip -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzip -tf "$ARCHIVE"
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzip -tf "$ARCHIVE"
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzip -cf "$ARCHIVE" "${@:3}"
             else
-                single_file_only "${@:3}" || die "lz: single file only"
+                single_file_only "${@:3}" || die "lz: multiple files -- use .tar.lz for archives"
                 lzip -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar --lzip -tf "$ARCHIVE" > /dev/null
             else
                 lzip -t "$ARCHIVE"
@@ -472,39 +500,43 @@ type_lz() {
 }
 
 type_lz4() {
+    require_tool lz4
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 lz4 -dc "$ARCHIVE" | tar -xf - -C "$3"
             else
-                lz4 -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                lz4 -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 lz4 -dc "$ARCHIVE" | tar -tf -
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 lz4 -dc "$ARCHIVE" | tar -tf -
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cf - "${@:3}" | lz4 > "$ARCHIVE"
             else
-                single_file_only "${@:3}" || die "lz4: single file only"
+                single_file_only "${@:3}" || die "lz4: multiple files -- use .tar.lz4 for archives"
                 lz4 "$3" "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 lz4 -dc "$ARCHIVE" | tar -tf - > /dev/null
             else
                 lz4 -t "$ARCHIVE"
@@ -513,39 +545,43 @@ type_lz4() {
 }
 
 type_br() {
+    require_tool brotli
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 brotli -dc "$ARCHIVE" | tar -xf - -C "$3"
             else
-                brotli -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                brotli -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 brotli -dc "$ARCHIVE" | tar -tf -
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 brotli -dc "$ARCHIVE" | tar -tf -
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cf - "${@:3}" | brotli > "$ARCHIVE"
             else
-                single_file_only "${@:3}" || die "br: single file only"
+                single_file_only "${@:3}" || die "br: multiple files -- use .tar.br for archives"
                 brotli -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 brotli -dc "$ARCHIVE" | tar -tf - > /dev/null
             else
                 brotli -t "$ARCHIVE"
@@ -554,39 +590,43 @@ type_br() {
 }
 
 type_sz() {
+    require_tool snzip
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 snunzip -c "$ARCHIVE" | tar -xf - -C "$3"
             else
-                snunzip -c "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                snunzip -c "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 snunzip -c "$ARCHIVE" | tar -tf -
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 snunzip -c "$ARCHIVE" | tar -tf -
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cf - "${@:3}" | snzip > "$ARCHIVE"
             else
-                single_file_only "${@:3}" || die "sz: single file only"
+                single_file_only "${@:3}" || die "sz: multiple files -- use .tar.sz for archives"
                 snzip -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 snunzip -c "$ARCHIVE" | tar -tf - > /dev/null
             else
                 snunzip -t "$ARCHIVE"
@@ -595,39 +635,43 @@ type_sz() {
 }
 
 type_bz3() {
+    require_tool bzip3
     local OP=$1
     local ARCHIVE=$2
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
     case "$OP" in
         extract)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 bzip3 -dc "$ARCHIVE" | tar -xf - -C "$3"
             else
-                bzip3 -dc "$ARCHIVE" > "$3/$(subdir_name "$ARCHIVE" "$INNER")"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                bzip3 -dc "$ARCHIVE" > "$3/$SUBDIR"
             fi ;;
         list)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 bzip3 -dc "$ARCHIVE" | tar -tf -
             else
-                echo "(compressed: $(subdir_name "$ARCHIVE" "$INNER"))"
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                echo "$SUBDIR"
             fi ;;
         paths)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 bzip3 -dc "$ARCHIVE" | tar -tf -
             else
                 subdir_name "$ARCHIVE" "$INNER"
             fi ;;
         create)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 tar -cf - "${@:3}" | bzip3 > "$ARCHIVE"
             else
-                single_file_only "${@:3}" || die "bz3: single file only"
+                single_file_only "${@:3}" || die "bz3: multiple files -- use .tar.bz3 for archives"
                 bzip3 -c "$3" > "$ARCHIVE"
             fi ;;
         test)
-            if [[ $INNER == tar ]]; then
+            if inner_is_tar "$INNER"; then
                 bzip3 -dc "$ARCHIVE" | tar -tf - > /dev/null
             else
                 bzip3 -t "$ARCHIVE"
@@ -650,6 +694,8 @@ type_tar() {
 }
 
 type_zip() {
+    require_tool unzip
+    require_tool zip
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -662,6 +708,7 @@ type_zip() {
 }
 
 type_7z() {
+    require_tool 7z
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -674,6 +721,8 @@ type_7z() {
 }
 
 type_rar() {
+    require_tool unrar
+    require_tool rar
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -686,6 +735,7 @@ type_rar() {
 }
 
 type_lzh() {
+    require_tool lha
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -698,6 +748,7 @@ type_lzh() {
 }
 
 type_cab() {
+    require_tool cabextract
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -715,6 +766,7 @@ type_cab() {
 }
 
 type_ace() {
+    require_tool unace
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -727,6 +779,7 @@ type_ace() {
 }
 
 type_deb() {
+    require_tool dpkg-deb
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -739,6 +792,8 @@ type_deb() {
 }
 
 type_rpm() {
+    require_tool rpm
+    require_tool cpio
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -751,6 +806,7 @@ type_rpm() {
 }
 
 type_cpio() {
+    require_tool cpio
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -763,18 +819,20 @@ type_cpio() {
 }
 
 type_ar() {
+    require_tool ar
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
         extract) ar x --output="$3" "$ARCHIVE" ;;
         list)    ar t "$ARCHIVE" ;;
         paths)   ar t "$ARCHIVE" ;;
-        create)  ar r "$ARCHIVE" "${@:3}" ;;
+        create)  rm -f "$ARCHIVE" && ar r "$ARCHIVE" "${@:3}" ;;
         test)    ar t "$ARCHIVE" > /dev/null ;;
     esac
 }
 
 type_exe() {
+    require_tool innoextract
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
@@ -845,10 +903,12 @@ resolve_dest() {
     local TYPE=$2
     local DEST=$3
     local INNER
+    local SUBDIR
 
     INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
     if is_tarbomb "$ARCHIVE" "$TYPE"; then
-        echo "$DEST/$(subdir_name "$ARCHIVE" "$INNER")"
+        echo "$DEST/$SUBDIR"
     else
         echo "$DEST"
     fi
@@ -868,7 +928,9 @@ cmd_extract() {
     TYPE=$(detect_type "$ARCHIVE")
     FINAL_DEST=$(resolve_dest "$ARCHIVE" "$TYPE" "$DEST")
     if [[ $FINAL_DEST != "$DEST" ]]; then
-        path_exists "$FINAL_DEST" && die "Destination already exists: $FINAL_DEST"
+        if path_exists "$FINAL_DEST"; then
+            die "Destination already exists: $FINAL_DEST"
+        fi
         printf 'Extracting to %s/\n' "$FINAL_DEST"
     fi
     mkdir -p "$FINAL_DEST"
@@ -923,6 +985,11 @@ Formats:
   Compressors: gz bz2 xz zst lz4 lzma lz br sz bz3
   Containers:  tar zip 7z rar lzh cab ace  deb rpm cpio ar  exe
                cbz cbr cb7 cbt (comic books)  iso (disk images)
+
+Limitations:
+  arc c not supported for: cab ace deb rpm exe
+  Bare compressors: use compound extension (.tar.gz, .tar.xz, ...)
+    for archives with multiple files
 
 Examples:
   arc x foo.tar.xz           Extract (auto-creates subdir if needed)

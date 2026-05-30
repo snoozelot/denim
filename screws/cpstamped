@@ -4,23 +4,54 @@
 # WHAT IT DOES
 #
 # Creates PATH.EPOCH backup for each argument (e.g., config.1735689600).
-# Symlinks are dereferenced — backup contains actual content.
+# --link-mode controls how symbolic links are handled:
+#   keep     — preserve links as links everywhere
+#   shallow  — materialize top-level args only, preserve internal links (default)
+#   deep     — materialize everything recursively
+#
+# WHY
+#
+# Quick timestamped backups before editing. One command, no thinking.
+# Avoids the "edit a file, wish you'd backed it up first" cycle.
+# No external dependencies beyond coreutils — works on any POSIX system.
+#
+# HOW IT WORKS
+#
+# Resolve each PATH to a canonical path, append epoch seconds, copy.
+# Files: cp with link-mode flag (-P never follow, -L always follow).
+# Directories: tar with --exclude and --dereference for deep mode,
+#   piped to tar extract into snapshot dir (single pass, no wasted IO).
+# List mode finds existing backups via glob ($SRC, $SRC.[0-9]{10}).
 #
 # USAGE
 #
-#   cpstamped [-l|-n] PATH...
+#   cpstamped [-l|-n] [--link-mode keep|shallow|deep] PATH...
 #
 # OPTIONS
 #
-#   -l         List existing backups with human-readable timestamps
-#   -n         Dry run — show what would be copied without copying
-#   -h, --help Show this help
+#   -l                   List existing backups with human-readable timestamps
+#   -n                   Dry run — show what would be copied without copying
+#   --link-mode MODE     Link resolution: keep|shallow (default)|deep
+#   -h, --help           Show this help
+#
+# EXIT CODES
+#
+#   0   All backups created successfully
+#   1   One or more paths failed (missing, broken symlink, write error)
+#
+# DEPENDENCIES
+#
+#   coreutils: realpath, stat, column, sort, cut
+#   util-linux: date (with -d @epoch support)
+#   POSIX: cp (with -P, -R, -p, -L), tar
 #
 # EXAMPLES
 #
-#   cpstamped config.yaml           # creates config.yaml.1712345678
-#   cpstamped -l config.yaml        # list all backups of config.yaml
-#   cpstamped -n /etc/nginx/        # dry-run backup of directory
+#   cpstamped config.yaml                   # creates config.yaml.1712345678 (shallow)
+#   cpstamped --link-mode keep config.yaml  # preserve symlinks as symlinks
+#   cpstamped --link-mode deep /etc/nginx/  # materialize everything recursively
+#   cpstamped -l config.yaml                # list all backups of config.yaml
+#   cpstamped -n /etc/nginx/                # dry-run backup of directory
 
 set -euo pipefail
 
@@ -37,10 +68,12 @@ EXCLUDE=(
 
 has_arguments()  { [[ $# -gt 0 ]]; }
 is_dryrun()      { [[ -n "${DRYRUN:-}" ]]; }
-is_list()        { [[ -n "${LIST:-}" ]]; }
 exists()         { [[ -e $1 ]]; }
 is_directory()   { [[ -d $1 ]]; }
-has_timestamp()  { [[ $1 =~ \.([0-9]{10})$ ]]; }
+is_symlink()     { [[ -L $1 ]]; }
+has_timestamp()  { [[ $1 =~ \.([0-9]{10})$ ]]; }  # SIDEFF: sets BASH_REMATCH
+got()            { [[ -n $1 ]]; }
+no()             { [[ -z $1 ]]; }
 
 # ============================================================================
 # Helpers
@@ -49,29 +82,34 @@ has_timestamp()  { [[ $1 =~ \.([0-9]{10})$ ]]; }
 usage()            { sed -n '2,/^$/{ s/^# \?//p }' "$0"; }
 file_mtime()       { stat -c %Y "$1" 2>/dev/null || echo 0; }
 format_timestamp() { date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "invalid"; }
+die()              { echo "$*" >&2; exit 1; }
+log()   { printf >&2 '[INFO]'; printf >&2 ' %q' "$@"; printf >&2 '\n'; }
+run()   { log "$@"; "$@"; }
 
 # ============================================================================
 # List mode
 # ============================================================================
 
-list_backups() {
-    local ARG
-    local SRC
-    local BACKUP
-    local STAMP
-    local FORMATTED
+print_backup_info() {
+    local BACKUP=$1 STAMP FORMATTED
+    if has_timestamp "$BACKUP"; then
+        STAMP=${BASH_REMATCH[1]}
+    else
+        STAMP=$(file_mtime "$BACKUP")
+    fi
+    FORMATTED=$(format_timestamp "$STAMP")
+    printf '%s\t%s\t%s\n' "$STAMP" "$BACKUP" "$FORMATTED"
+}
 
-    for ARG in "$@"; do
-        SRC=$(realpath -s "$ARG")
-        for BACKUP in "$SRC" "$SRC"$TIMESTAMP_GLOB; do
+list_backups() {
+    local ARG SRC BACKUP
+
+    for ARG; do
+        SRC=$(realpath -s -- "$ARG")
+        print_backup_info "$SRC"
+        for BACKUP in "$SRC"$TIMESTAMP_GLOB; do
             exists "$BACKUP" || continue
-            if has_timestamp "$BACKUP"; then
-                STAMP=${BASH_REMATCH[1]}
-            else
-                STAMP=$(file_mtime "$BACKUP")
-            fi
-            FORMATTED=$(format_timestamp "$STAMP")
-            printf '%s\t%s\t%s\n' "$STAMP" "$BACKUP" "$FORMATTED"
+            print_backup_info "$BACKUP"
         done
     done | sort -n | cut -f2- | column -t -s $'\t'
 }
@@ -80,28 +118,43 @@ list_backups() {
 # Copy mode
 # ============================================================================
 
-exclude_flags() {
-    local ITEM
-    for ITEM in "${EXCLUDE[@]}"; do
-        printf '%s ' "--exclude=$ITEM"
-    done
-}
-
-# Trailing slash on directory source: copy contents into dest, not dir-in-dir
-copy_backup() {
+# Copy with link-mode control, excluding defined patterns via tar
+create_snapshot() {
     local SRC=$1
     local SNAPSHOT=$2
-    local FLAGS=$3
-    local RESOLVED
-    local EXCLUDES
+    local LINK_MODE=$3
+    local REAL
+    local DEEP_FLAG
 
-    RESOLVED=$(realpath "$SRC")
-    EXCLUDES=$(exclude_flags)
+    if is_dryrun; then
+        echo "copy: \"$SRC\" -> \"$SNAPSHOT\""
+        return
+    fi
 
-    if is_directory "$RESOLVED"; then
-        ( set -x; rsync $FLAGS $EXCLUDES -- "$SRC/" "$SNAPSHOT" )
+    # keep: symlinks stay as symlinks
+    if [[ $LINK_MODE == keep ]] && is_symlink "$SRC"; then
+        run cp -Pp "$SRC" "$SNAPSHOT"
+        return
+    fi
+
+    # shallow: resolve top-level argument
+    if [[ $LINK_MODE == shallow ]]; then
+        REAL=$(realpath -- "$SRC") || { echo "cpstamped: $SRC: broken symlink" >&2; return 1; }
     else
-        ( set -x; rsync $FLAGS $EXCLUDES -- "$SRC" "$SNAPSHOT" )
+        REAL=$SRC
+    fi
+
+    if is_directory "$REAL"; then
+        DEEP_FLAG=()
+        mkdir -p "$SNAPSHOT"
+        [[ $LINK_MODE == deep ]] && DEEP_FLAG=(--dereference)
+        tar cf - --exclude=.terraform --exclude=sessions "${DEEP_FLAG[@]}" -C "$REAL" . \
+        | tar xf - -C "$SNAPSHOT" \
+        || return 1
+    elif [[ $LINK_MODE == deep ]]; then
+        run cp -RpL "$REAL" "$SNAPSHOT"
+    else
+        run cp -Pp "$REAL" "$SNAPSHOT"
     fi
 }
 
@@ -114,30 +167,71 @@ main() {
     local SRC
     local SNAPSHOT
     local STAMP
-    local FLAGS
+    local LINK_MODE=shallow
+    local LIST=
+    local DRYRUN=
     local RC=0
 
-    if [[ ${1:-} == -h || ${1:-} == --help ]]; then usage; exit 0; fi
-    if [[ ${1:-} == -l ]]; then LIST=1; shift; fi
-    if [[ ${1:-} == -n ]]; then DRYRUN=1; shift; fi
-    has_arguments "$@" || { usage; exit 0; }
+    parse_options "$@"
 
-    if is_list; then list_backups "$@"; exit 0; fi
+    has_arguments "${REMAINING[@]}" || { usage; exit 0; }
 
-    FLAGS=-aL
-    if is_dryrun; then FLAGS=-aLn; fi
+    if got "$LIST"; then list_backups "${REMAINING[@]}"; exit 0; fi
 
     STAMP=$(TZ=UTC date '+%s')
 
-    for ARG in "$@"; do
-        SRC=$(realpath -s "$ARG")
+    for ARG in "${REMAINING[@]}"; do
+        SRC=$(realpath -s -- "$ARG")
         SNAPSHOT="${SRC}.${STAMP}"
         exists "$SRC" || { echo "cpstamped: $ARG: No such file or directory" >&2; RC=1; continue; }
         if exists "$SNAPSHOT"; then continue; fi
-        copy_backup "$SRC" "$SNAPSHOT" "$FLAGS" || RC=$?
+        create_snapshot "$SRC" "$SNAPSHOT" "$LINK_MODE" || RC=$?
     done
 
     exit $RC
+}
+
+# ============================================================================
+# Option parsing — sets LINK_MODE, LIST, DRYRUN, REMAINING
+# ============================================================================
+
+REMAINING=()
+
+# SIDEFF: sets LIST, DRYRUN from bundled flags
+parse_bundled_flags() {
+    local FLAGS=$1
+    while got "$FLAGS"; do
+        case ${FLAGS:0:1} in
+            l) LIST=1 ;;
+            n) DRYRUN=1 ;;
+            *) die "cpstamped: unknown flag -${FLAGS:0:1}" ;;
+        esac
+        FLAGS=${FLAGS:1}
+    done
+}
+
+parse_options() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)  usage; exit 0 ;;
+            -l)         LIST=1; shift ;;
+            -n)         DRYRUN=1; shift ;;
+            --link-mode)
+                shift
+                case ${1:-} in
+                    keep|shallow|deep) LINK_MODE=$1; shift ;;
+                    *) die "cpstamped: --link-mode requires keep|shallow|deep" ;;
+                esac
+                ;;
+            --)         shift; break ;;
+            -?*)
+                parse_bundled_flags "${1:1}"
+                shift
+                ;;
+            *) break ;;
+        esac
+    done
+    REMAINING=("$@")
 }
 
 main "$@"
