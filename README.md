@@ -23,6 +23,7 @@ Unix shell utilities. Two categories:
 | `mkdire` | mkdir parent dirs, then execute command |
 | `pdsc` | List process descendants |
 | `slay` | Kill processes with SIGKILL |
+| `soak` | Read all stdin, then write to file |
 | `tabexec` | Execute commands, format output as aligned table |
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |

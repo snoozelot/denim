@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# soak — read all stdin, then write to file
+#
+# WHAT IT DOES
+#
+# Soaks up all stdin before writing to a destination file.
+# This enables reading from and writing to the same file
+# within a single pipeline, like sponge(1).
+#
+# WHY
+#
+# A naive "cmd <file >file" truncates the file before cmd
+# reads it.  soak reads everything first, so the source
+# isn't corrupted.
+#
+# HOW IT WORKS
+#
+# Writes stdin to a temp file.  On exit (normal or signal),
+# copies the temp to the destination and removes the temp.
+# This avoids holding all data in memory.  Signal trapping
+# ensures cleanup on SIGTERM/SIGQUIT/SIGHUP too, which is
+# necessary in pipeline use like:
+#   dmesg -Tw | tee /dev/stderr | soak /tmp/log
+#
+# USAGE
+#
+#   command | soak [file]
+#
+# If no file given (or -), writes to stdout.
+# No pipe and no file argument = silent noop.
+#
+# OPTIONS
+#
+#   (none — takes an optional file argument)
+#
+# EXAMPLES
+#
+#   dmesg -Tw | soak /tmp/log      # capture to file, safe to edit after
+#   sort file | soak file           # sort in-place
+#   head -n5 file | soak            # write filtered lines to stdout
+#
+# EXIT CODES
+#
+#   0   Success
+#   1   Write error (disk full, permission denied)
+#
+# DEPENDENCIES
+#
+#   POSIX: cat, rm, mktemp
+
+set -euo pipefail
+
+# --- predicates ---
+
+is_piped()         { [[ ! -t 0 ]]; }
+has_arguments()    { [[ $# -gt 0 ]]; }
+
+# --- core ---
+
+soak()             { cat >"$1"; }
+
+wring_out() {
+    local TEMP=$1
+    local OUTPUT=$2
+
+    if [[ $OUTPUT == - ]]; then
+        cat "${TEMP}"
+    else
+        cat >"${OUTPUT}" "${TEMP}"
+    fi
+    rm -f "${TEMP}"
+}
+
+# --- globals ---
+
+TEMP=
+OUTPUT=
+
+cleanup() { wring_out "${TEMP}" "${OUTPUT}"; }
+
+# --- orchestration ---
+
+main() {
+    TEMP=$(mktemp)
+    OUTPUT=${1:--}
+
+    trap cleanup EXIT QUIT TERM HUP
+
+    soak "${TEMP}"
+}
+
+is_piped || has_arguments "$@" || exit 0
+main "$@"
