@@ -22,14 +22,14 @@ Shell tools organized into useful **screw** and **toys**.
 | `killtree` | Kill a process and all its descendants |
 | `mkdire` | mkdir parent dirs, then execute command |
 | `mkpin` | Name a directory, open files from anywhere with tab completion |
-| `mutexec` | Clean wrapper around 2>/dev/null |
+| `mutexec` | Clean wrapper around &>/dev/null |
 | `pdsc` | List process descendants |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
 | `tabexec` | Execute commands, format output as aligned table |
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |
-| `zenexec` | Clean wrapper around &>/dev/null |
+| `zenexec` | Clean wrapper around 2>/dev/null |
 | `zrun` | Run commands from compressed scripts |
 
 Shell scripts: `path-expand.sh`, `path-shorten.sh`

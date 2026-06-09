@@ -1,27 +1,27 @@
 #!/bin/bash
-# zenexec - Clean wrapper around &>/dev/null
+# zenexec - Clean wrapper around 2>/dev/null
 #
 # WHAT IT DOES
-# Runs COMMAND with both stdout and stderr redirected to /dev/null.
-# Exit code passes through.
+# Runs COMMAND with stderr redirected to /dev/null. Stdout and exit code
+# pass through unchanged.
 #
 # WHY
-# &>/dev/null is punctuation, not prose. zenexec names the intent:
-# complete output suppression. One word instead of a glyph.
+# 2>/dev/null is punctuation, not prose. zenexec names the intent:
+# filter noise, keep signal. Like zen cutting through distraction.
 #
 # HOW IT WORKS
-# exec replaces the shell with COMMAND, redirecting fd 1 and 2 to
-# /dev/null before doing so.
+# exec replaces the shell with COMMAND, redirecting fd 2 to /dev/null
+# before doing so.
 #
 # USAGE: zenexec COMMAND [ARGS...]
 #
 # OPTIONS: none
 #
 # EXAMPLES
-#   zenexec npm install        # &>/dev/null
-#   zenexec curl -sL url       # double silence
+#   zenexec rsync -a src/ dst/     # suppress diagnostic noise
+#   zenexec apt-get install tree   # noise out, info visible
 #
 # EXIT CODES: passes through COMMAND's exit code
 # DEPENDENCIES: bash only
 
-exec "$@" &>/dev/null
+exec "$@" 2>/dev/null

@@ -1,27 +1,27 @@
 #!/bin/bash
-# mutexec - Clean wrapper around 2>/dev/null
+# mutexec - Clean wrapper around &>/dev/null
 #
 # WHAT IT DOES
-# Runs COMMAND with stderr redirected to /dev/null. Stdout and exit code
-# pass through unchanged.
+# Runs COMMAND with both stdout and stderr redirected to /dev/null.
+# Stdout and stderr are both suppressed. Exit code passes through.
 #
 # WHY
-# 2>/dev/null is punctuation, not prose. mutexec names the intent:
-# suppress noise without losing output. One word instead of a glyph.
+# &>/dev/null is punctuation, not prose. mutexec names the intent:
+# suppress everything. Mute means total silence.
 #
 # HOW IT WORKS
-# exec replaces the shell with COMMAND, redirecting fd 2 to /dev/null
-# before doing so.
+# exec replaces the shell with COMMAND, redirecting fd 1 and 2 to
+# /dev/null before doing so.
 #
 # USAGE: mutexec COMMAND [ARGS...]
 #
 # OPTIONS: none
 #
 # EXAMPLES
-#   mutexec rsync -a src/ dst/     # 2>/dev/null
-#   mutexec apt-get install tree   # noise out, info visible
+#   mutexec npm install          # sudo apt -qq noise
+#   mutexec curl -sL url         # suppress progress output
 #
 # EXIT CODES: passes through COMMAND's exit code
 # DEPENDENCIES: bash only
 
-exec "$@" 2>/dev/null
+exec "$@" &>/dev/null
