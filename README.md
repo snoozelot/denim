@@ -17,19 +17,19 @@ Unix shell utilities. Two categories:
 | `cycle` | Cycle through ring of options |
 | `cyclines` | Permute lines via cycle notation |
 | `echofile` | Create files named after their content |
-| `fenced` | Podman with sane defaults for desktop apps |
+| `iwatch` | Run command on file change (inotify) |
+| `iiwatch` | Run command on file change, F5, or midnight |
 | `killtree` | Kill a process and all its descendants |
 | `mkdire` | mkdir parent dirs, then execute command |
 | `pdsc` | List process descendants |
-| `rssh` | Sync directory to remote and run commands |
 | `slay` | Kill processes with SIGKILL |
 | `tabexec` | Execute commands, format output as aligned table |
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |
-| `z` | Jump to frecent directories |
 | `zrun` | Run commands from compressed scripts |
 
-C tools (also in screws/): `path-expand`, `path-shorten`, `prefix`
+Shell scripts: `path-expand.sh`, `path-shorten.sh` (C source alongside in screws/)
+C source (no script): `prefix.c`
 
 **toys/** — fun and educational
 
