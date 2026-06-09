@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# mkpin — scoped tab completion for any directory
+#
+# WHAT IT DOES
+#
+#   Pin a directory to a name, then get tab completion for files under
+#   that directory, scoped by name.  Works from any working directory.
+#
+#   mkpin agents ~/.pi/agent    →  agents AG<tab> completes AGENTS.md
+#   mkpin notes ~/notes         →  notes<tab> completes filenames
+#
+#   Without arguments: opens today's date file (DIR/YYYY-MM-DD.md).
+#   With filenames: edits them in $EDITOR (resolved under DIR).
+#
+# WHY
+#
+#   Instead of cd ~/notes && vim file.md, just run notes file from
+#   anywhere.  Tab completion works because the completion function
+#   knows which directory to look in.  One shell function replaces a
+#   per-tool script plus a separate completion block.
+#
+# HOW IT WORKS
+#
+#   mkpin stores DIR in MKPIN_DIR[NAME], defines a shell function
+#   NAME that forwards to mkpin_dispatch, and registers a completion
+#   function that finds non-hidden files under DIR.  The only eval is
+#   the one-line function definition — all logic lives in real functions.
+#
+# USAGE
+#
+#   source screws/mkpin
+#   mkpin NAME DIR
+#
+# DEFINED COMMAND
+#
+#   NAME            today's date file: DIR/YYYY-MM-DD.md
+#   NAME FILE...    edit FILE(s) in $EDITOR
+#   NAME --cat      list non-hidden files under DIR
+#   NAME FILE --cat cat FILE content
+#   NAME --path     print DIR path
+#   NAME FILE --path print absolute path
+#   NAME --help     show usage
+#
+# EXAMPLES
+#
+#   mkpin agents ~/.pi/agent
+#   agents               # opens ~/.pi/agent/2026-04-26.md
+#   agents AGENTS.md     # edits AGENTS.md from any directory
+#   agents --cat | fzy   # pick file interactively, from anywhere
+#
+# DEPENDENCIES
+#
+#   bash 4+, find, sed, date (GNU)
+
+declare -gA MKPIN_DIR
+
+mkpin_today()  { date -Idate; }
+
+is_cat_flag()  { [[ $1 == --cat ]]; }
+is_help_flag() { [[ $1 == --help ]]; }
+is_path_flag() { [[ $1 == --path ]]; }
+is_relative()  { [[ $1 != /* ]]; }
+has_files()    { [[ $1 -gt 0 ]]; }
+got()          { [[ -n $1 ]]; }
+no()           { [[ -z $1 ]]; }
+
+mkpin_resolve() {
+    local DIR=$1
+    shift
+
+    local ARG
+    for ARG in "$@"; do
+        if is_relative "$ARG"; then ARG=$DIR/$ARG; fi
+        printf '%s\n' "$ARG"
+    done
+}
+
+mkpin_list() {
+    local DIR=$1
+
+    find "$DIR" -mindepth 1 \( -name '.*' -prune \) -o -print \
+    | sed "s|^$DIR/||"
+}
+
+mkpin_edit() {
+    local DIR=$1
+    shift
+
+    local -a PATHS
+    mapfile -t PATHS < <(mkpin_resolve "$DIR" "$@")
+
+    ${EDITOR:-vi} "${PATHS[@]}"
+    printf '%s\n' "${PATHS[@]}"
+}
+
+mkpin_cat() {
+    local DIR=$1
+    shift
+
+    local -a PATHS
+    mapfile -t PATHS < <(mkpin_resolve "$DIR" "$@")
+
+    cat "${PATHS[@]}"
+    printf '%s\n' "${PATHS[@]}" >&2
+}
+
+mkpin_path() {
+    local DIR=$1
+    shift
+
+    if ! has_files $#; then
+        printf '%s\n' "$DIR"
+        return 0
+    fi
+
+    mkpin_resolve "$DIR" "$@"
+}
+
+mkpin_usage() {
+    local NAME=$1
+    local DIR=${MKPIN_DIR[$NAME]}
+
+    cat >&2 <<EOF
+Usage: $NAME [FILE...] [--cat|--path|--help]
+Pinned directory: $DIR
+EOF
+}
+
+mkpin_dispatch() {
+    local NAME=$1
+    local DIR=${MKPIN_DIR[$NAME]}
+    shift
+
+    local -a FILES
+    local MODE=
+    local ARG
+
+    for ARG in "$@"; do
+        if is_help_flag "$ARG" || is_cat_flag "$ARG" || is_path_flag "$ARG"; then
+            MODE=$ARG
+        else
+            FILES+=("$ARG")
+        fi
+    done
+
+    if no "$MODE"; then
+        if ! has_files "${#FILES[@]}"; then FILES=("$(mkpin_today).md"); fi
+        mkpin_edit "$DIR" "${FILES[@]}"
+    elif is_help_flag "$MODE"; then
+        mkpin_usage "$NAME"
+    elif is_path_flag "$MODE"; then
+        mkpin_path "$DIR" "${FILES[@]}"
+    elif ! has_files "${#FILES[@]}"; then
+        mkpin_list "$DIR"
+    else
+        mkpin_cat "$DIR" "${FILES[@]}"
+    fi
+}
+
+mkpin_complete() {
+    local NAME=$1
+    local DIR=${MKPIN_DIR[$NAME]}
+    local CUR=${COMP_WORDS[COMP_CWORD]}
+    local SEARCH_DIR
+    local FILES
+
+    if [[ $CUR == */* ]]; then
+        SEARCH_DIR=$DIR/${CUR%/*}
+    else
+        SEARCH_DIR=$DIR
+    fi
+
+    FILES=$(
+        find "$SEARCH_DIR" -mindepth 1 -maxdepth 1 \( -name '.*' -prune \) -o -print \
+        | sed "s|^$DIR/||" \
+        | while IFS= read -r F; do
+            if [[ -d $DIR/$F ]]; then printf '%s/\n' "$F"; else printf '%s\n' "$F"; fi
+        done
+    )
+    mapfile -t COMPREPLY < <(compgen -W "$FILES" -- "$CUR")
+}
+
+mkpin() {
+    local NAME=$1
+    local DIR
+
+    if is_help_flag "$NAME"; then
+        cat >&2 <<'USAGE'
+Usage: mkpin NAME DIR
+       NAME [FILE...] [--cat|--path|--help]
+
+Register a pinned directory function with tab completion.
+  mkpin agents ~/.pi/agent    creates agents() function
+  mkpin notes ~/notes         creates notes() function
+USAGE
+        return 0
+    fi
+
+    DIR=$(realpath -m "$2")
+
+    MKPIN_DIR[$NAME]=$DIR
+    eval "${NAME}() { mkpin_dispatch ${NAME} \"\$@\"; }"
+    complete -o nospace -F mkpin_complete "$NAME"
+}

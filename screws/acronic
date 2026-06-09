@@ -7,17 +7,40 @@
 # completely detached from the terminal using setsid. The command continues
 # running even after the terminal closes.
 #
+# WHY
+#
+# Cron jobs triggered from an interactive session or another script need to
+# outlive the caller. A plain background job (&) dies when the terminal
+# closes; setsid severs the terminal dependency.
+#
+# HOW IT WORKS
+#
+#   - Delegates to cronic for quiet execution and failure logging
+#   - setsid detaches from the current terminal/session
+#   - All output (stdout/stderr) redirected to /dev/null
+#     (cronic writes its log independently)
+#   - Final & backgrounds the process, returns immediately
+#
 # USAGE
 #
 #   acronic COMMAND [ARGS...]
+#
+# OPTIONS
+#
+#   None. All arguments passed through to cronic.
 #
 # EXAMPLES
 #
 #   acronic backup.sh /data      # run backup silently in background
 #   acronic rsync -av src/ dst/  # background sync, log only on failure
 #
+# EXIT CODES
+#
+#   0 — always (exit of the background process is in cronic's log)
+#
 # DEPENDENCIES
 #
-#   cronic, setsid
+#   cronic — quiet execution and logging
+#   setsid (util-linux) — session detachment
 
 setsid cronic "$@" &>/dev/null &

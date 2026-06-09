@@ -4,25 +4,49 @@
 # WHAT IT DOES
 #
 # Executes a bash script silently, only producing output if the command
-# fails (non-zero exit). Useful for cron jobs where you only want
-# notifications on failure.
+# fails (non-zero exit). Tailored for cron jobs where stdout/stderr is
+# noise unless something breaks.
+#
+# WHY
+#
+# Cron mails every line of output by default. Most jobs are silent on
+# success. Cronic suppresses success output and surfaces only failures,
+# keeping mailboxes clean while preserving full logs for forensics.
+#
+# HOW IT WORKS
+#
+#   - Expands placeholders (ISOSTAMP, PID, RANDOM) in LOG_FILE
+#   - Captures stdout and stderr separately with timestamps via ts
+#   - Logs PWD, ARGV, and EXIT status for debugging
+#   - On success: suppresses all output, writes full log to LOG_FILE
+#   - On failure: prints stdout/stderr, writes full log to LOG_FILE
+#   - Temporary files cleaned up automatically
+#   - Exit status of the original command is preserved
 #
 # USAGE
 #
 #   cronic LOG_FILE SCRIPT
 #
-# HOW IT WORKS
+# OPTIONS
 #
-#   - Captures stdout and stderr separately with timestamps
-#   - Supports placeholders in LOG_FILE: ISOSTAMP, PID, RANDOM
-#   - Logs PWD, ARGV, and EXIT status for debugging
-#   - Temporary files cleaned up automatically
-#   - Exit status of the original command is preserved
+#   None. Positional arguments only.
 #
 # EXAMPLES
 #
 #   cronic /var/log/backup-ISOSTAMP.log /usr/local/bin/backup.sh
 #   cronic /tmp/db-ISOSTAMP.log 'pg_dump mydb > /backup/db.sql'
+#
+# EXIT CODES
+#
+#   0 — command completed successfully (no output shown)
+#   1 — missing or invalid arguments
+#   * — exit code of the wrapped command (shown on failure)
+#
+# DEPENDENCIES
+#
+#   ts (moreutils) — timestamping log entries
+#   sed (POSIX) — placeholder expansion
+#   date (POSIX) — ISO timestamp generation
 
 set -euo pipefail
 
@@ -38,9 +62,9 @@ has_args()  { [[ $# -ge 2 ]]; }
 # --- actions ---
 
 usage() {
-    echo "Usage: $0 LOG_FILE SCRIPT"
-    echo "Run bash SCRIPT quietly unless it fails, log to LOG_FILE"
-    echo "Placeholders: ISOSTAMP, PID, RANDOM"
+    echo "Usage: $0 LOG_FILE SCRIPT" >&2
+    echo "Run bash SCRIPT quietly unless it fails, log to LOG_FILE" >&2
+    echo "Placeholders: ISOSTAMP, PID, RANDOM" >&2
     exit 1
 }
 

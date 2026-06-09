@@ -1,38 +1,43 @@
-# denim
+# denim — Unix shell utilities
 
-Unix shell utilities. Two categories:
+Shell tools organized into useful **screw** and **toys**.
 
-**screws/** — production tools for everyday shell work
+## screws/ — production tools
 
 | Tool | Purpose |
 |------|---------|
-| `acronic` | Run cronic asynchronously, fully detached |
+| `acronic` | Run in background, log output, show only on failure |
 | `arc` | Universal archive wrapper (tar, zip, 7z, rar, deb, rpm, cbz...) |
 | `ched` | Cache command output with time-based expiration |
 | `cidr-contains` | Check if one CIDR block contains another |
 | `cidr-host` | Calculate host IP within CIDR prefix (Tofu/Terraform compatible) |
 | `cidr-subnet` | Calculate subnet within CIDR prefix (Tofu/Terraform compatible) |
 | `cpstamped` | Copy files with Unix timestamp suffix |
-| `cronic` | Silent cron runner — output only on failure |
-| `cycle` | Cycle through ring of options |
-| `cyclines` | Permute lines via cycle notation |
+| `cronic` | Run a command, log output, show only on failure |
+| `cycle` | Return next item in a list, wrapping at end |
+| `cyclines` | Reorder lines by positional swaps |
 | `echofile` | Create files named after their content |
 | `iwatch` | Run command on file change (inotify) |
 | `iiwatch` | Run command on file change, F5, or midnight |
 | `killtree` | Kill a process and all its descendants |
 | `mkdire` | mkdir parent dirs, then execute command |
+| `mkpin` | Name a directory, open files from anywhere with tab completion |
+| `mutexec` | Clean wrapper around 2>/dev/null |
 | `pdsc` | List process descendants |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
 | `tabexec` | Execute commands, format output as aligned table |
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |
+| `zenexec` | Clean wrapper around &>/dev/null |
 | `zrun` | Run commands from compressed scripts |
 
-Shell scripts: `path-expand.sh`, `path-shorten.sh` (C source alongside in screws/)
+Shell scripts: `path-expand.sh`, `path-shorten.sh`
+(C source alongside in screws/)
+
 C source (no script): `prefix.c`
 
-**toys/** — fun and educational
+## toys/
 
 | Tool | Purpose |
 |------|---------|
