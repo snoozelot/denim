@@ -1,38 +1,60 @@
-#!/bin/bash
-# cpstamped — Copy file or directory with Unix timestamp suffix
+#!/usr/bin/env bash
+# cpstamped — timestamped backups before editing
 #
 # WHAT IT DOES
 #
-# Creates PATH.EPOCH backup for each argument (e.g., config.1735689600).
-# --link-mode controls how symbolic links are handled:
-#   keep     — preserve links as links everywhere
-#   shallow  — materialize top-level args only, preserve internal links (default)
-#   deep     — materialize everything recursively
+# Create a timestamped copy before editing.  One command per file, one
+# backup per edit.  Handles files and directories, with three link
+# modes for symbolic links (keep, shallow, deep).
 #
 # WHY
 #
-# Quick timestamped backups before editing. One command, no thinking.
-# Avoids the "edit a file, wish you'd backed it up first" cycle.
-# No external dependencies beyond coreutils — works on any POSIX system.
+# Quick timestamped backups before editing.  Avoids the "wish you'd
+# backed it up first" cycle.  One command, no thinking.
 #
 # HOW IT WORKS
 #
-# Resolve each PATH to a canonical path, append epoch seconds, copy.
-# Files: cp with link-mode flag (-P never follow, -L always follow).
-# Directories: tar with --exclude and --dereference for deep mode,
-#   piped to tar extract into snapshot dir (single pass, no wasted IO).
-# List mode finds existing backups via glob ($SRC, $SRC.[0-9]{10}).
+# Appends epoch seconds to the path (config → config.1735689600).
+# Files: cp with link-mode flags.  Directories: tar piped to tar
+# extract (single pass, excludes .terraform and sessions).  List mode
+# globs existing backups and shows them with human timestamps.
 #
 # USAGE
 #
-#   cpstamped [-l|-n] [--link-mode keep|shallow|deep] PATH...
+#   cpstamped [-l|-n] [--link-mode keep|shallow|deep] [--limbo|--target-dir DIR] PATH...
 #
 # OPTIONS
 #
 #   -l                   List existing backups with human-readable timestamps
 #   -n                   Dry run — show what would be copied without copying
 #   --link-mode MODE     Link resolution: keep|shallow (default)|deep
+#   --limbo              Create backup in ~/.limbo/YYYY-MM-DD/ instead of alongside
+#   --target-dir DIR     Create backup in DIR/ instead of alongside
 #   -h, --help           Show this help
+#
+# EXAMPLES
+#
+#   cpstamped config.yaml                   # creates config.yaml.1712345678 (shallow)
+#   cpstamped --link-mode keep config.yaml  # preserve symlinks as symlinks
+#   cpstamped --link-mode deep /etc/nginx/  # materialize everything recursively
+#   cpstamped -l config.yaml                # list all backups of config.yaml
+#   cpstamped -n /etc/nginx/                # dry-run backup of directory
+#   cpstamped --limbo file.c                # backup to ~/.limbo/YYYY-MM-DD/
+#   cpstamped --target-dir /tmp/backups f   # backup to /tmp/backups/
+#
+# CP FLAGS
+#
+#   -P    Never follow symlinks — copy the link itself
+#   -p    Preserve mode, ownership, timestamps
+#   -R    Recursive copy (directories)
+#   -L    Follow symlinks — materialize target (deep mode)
+#
+# Flag combos by mode:
+#   keep symlink         cp -Pp      — copies the symlink as-is
+#   shallow (file)       cp -Pp      — copies the resolved file
+#   shallow (directory)  tar         — cp -Rp semantically
+#   deep (file)          cp -RpL     — follow and materialize recursively
+#   deep (directory)     tar --dereference — cp -RpL semantically
 #
 # EXIT CODES
 #
@@ -43,24 +65,13 @@
 #
 #   coreutils: realpath, stat, column, sort, cut
 #   util-linux: date (with -d @epoch support)
-#   POSIX: cp (with -P, -R, -p, -L), tar
-#
-# EXAMPLES
-#
-#   cpstamped config.yaml                   # creates config.yaml.1712345678 (shallow)
-#   cpstamped --link-mode keep config.yaml  # preserve symlinks as symlinks
-#   cpstamped --link-mode deep /etc/nginx/  # materialize everything recursively
-#   cpstamped -l config.yaml                # list all backups of config.yaml
-#   cpstamped -n /etc/nginx/                # dry-run backup of directory
+#   POSIX: cp (with -P, -R, -p, -L), tar, readlink
 
 set -euo pipefail
 
 readonly TIMESTAMP_GLOB='.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
-
-EXCLUDE=(
-    .terraform/
-    sessions/
-)
+readonly LIMBO_DIR=~/.limbo
+readonly -a EXCLUDE=(.terraform sessions)
 
 # ============================================================================
 # Predicates
@@ -83,15 +94,17 @@ usage()            { sed -n '2,/^$/{ s/^# \?//p }' "$0"; }
 file_mtime()       { stat -c %Y "$1" 2>/dev/null || echo 0; }
 format_timestamp() { date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "invalid"; }
 die()              { echo "$*" >&2; exit 1; }
-log()   { printf >&2 '[INFO]'; printf >&2 ' %q' "$@"; printf >&2 '\n'; }
-run()   { log "$@"; "$@"; }
+log() { local LEVEL=$1; shift; printf >&2 "[%s]" "$LEVEL"; printf >&2 ' %q' "$@"; printf >&2 '\n'; }
+run() { log INFO "$@"; "$@"; }
 
 # ============================================================================
 # List mode
 # ============================================================================
 
 print_backup_info() {
-    local BACKUP=$1 STAMP FORMATTED
+    local BACKUP=$1
+    local STAMP
+    local FORMATTED
     if has_timestamp "$BACKUP"; then
         STAMP=${BASH_REMATCH[1]}
     else
@@ -102,7 +115,9 @@ print_backup_info() {
 }
 
 list_backups() {
-    local ARG SRC BACKUP
+    local ARG
+    local SRC
+    local BACKUP
 
     for ARG; do
         SRC=$(realpath -s -- "$ARG")
@@ -127,14 +142,14 @@ create_snapshot() {
     local DEEP_FLAG
 
     if is_dryrun; then
-        echo "copy: \"$SRC\" -> \"$SNAPSHOT\""
-        return
+        log DRY cp "$SRC" "$SNAPSHOT"
+        return 0
     fi
 
     # keep: symlinks stay as symlinks
     if [[ $LINK_MODE == keep ]] && is_symlink "$SRC"; then
         run cp -Pp "$SRC" "$SNAPSHOT"
-        return
+        return 0
     fi
 
     # shallow: resolve top-level argument
@@ -145,10 +160,11 @@ create_snapshot() {
     fi
 
     if is_directory "$REAL"; then
+        log INFO cp -Rp "$REAL" "$SNAPSHOT"
         DEEP_FLAG=()
         mkdir -p "$SNAPSHOT"
-        [[ $LINK_MODE == deep ]] && DEEP_FLAG=(--dereference)
-        tar cf - --exclude=.terraform --exclude=sessions "${DEEP_FLAG[@]}" -C "$REAL" . \
+        if [[ $LINK_MODE == deep ]]; then DEEP_FLAG=(--dereference); fi
+        tar cf - "${EXCLUDE[@]/#/--exclude=}" "${DEEP_FLAG[@]}" -C "$REAL" . \
         | tar xf - -C "$SNAPSHOT" \
         || return 1
     elif [[ $LINK_MODE == deep ]]; then
@@ -162,12 +178,24 @@ create_snapshot() {
 # Main
 # ============================================================================
 
+# Returns 0 and prints dry-run skip message when snapshot already exists
+skip_existing_snapshot() {
+    local SNAPSHOT=$1
+
+    if exists "$SNAPSHOT"; then
+        if is_dryrun; then echo "[DRY] snapshot exists, would be skipped: $SNAPSHOT" >&2; fi
+        return 0
+    fi
+    return 1
+}
+
 main() {
     local ARG
     local SRC
     local SNAPSHOT
     local STAMP
     local LINK_MODE=shallow
+    local TARGET_DIR=
     local LIST=
     local DRYRUN=
     local RC=0
@@ -182,10 +210,17 @@ main() {
 
     for ARG in "${REMAINING[@]}"; do
         SRC=$(realpath -s -- "$ARG")
-        SNAPSHOT="${SRC}.${STAMP}"
         exists "$SRC" || { echo "cpstamped: $ARG: No such file or directory" >&2; RC=1; continue; }
-        if exists "$SNAPSHOT"; then continue; fi
+        if got "$TARGET_DIR"; then
+            is_dryrun || mkdir -p "$TARGET_DIR"
+            BASENAME=$(basename "$SRC")
+            SNAPSHOT="${TARGET_DIR}/${BASENAME}.${STAMP}"
+        else
+            SNAPSHOT="${SRC}.${STAMP}"
+        fi
+        if skip_existing_snapshot "$SNAPSHOT"; then continue; fi
         create_snapshot "$SRC" "$SNAPSHOT" "$LINK_MODE" || RC=$?
+        if ! is_dryrun && [[ $RC -eq 0 ]] && got "$TARGET_DIR"; then echo "$SNAPSHOT"; fi
     done
 
     exit $RC
@@ -216,6 +251,12 @@ parse_options() {
             -h|--help)  usage; exit 0 ;;
             -l)         LIST=1; shift ;;
             -n)         DRYRUN=1; shift ;;
+            --limbo)    TARGET_DIR="$LIMBO_DIR/$(date +%F)"; shift ;;
+            --target-dir)
+                shift
+                got "${1:-}" || die "cpstamped: --target-dir requires a directory"
+                TARGET_DIR=$1; shift
+                ;;
             --link-mode)
                 shift
                 case ${1:-} in
