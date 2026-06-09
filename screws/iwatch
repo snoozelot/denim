@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# iwatch — run command on file change
+#
+# WHAT IT DOES
+#   Watches FILE for writes via inotify. When the file changes, re-runs
+#   COMMAND. Repeats: run, wait for change, run again.
+#   Event-driven — no polling, no CPU between changes.
+#
+# WHY
+#   Config or data store changes trigger a viewer or processor.
+#   Event-driven: no polling, instant response.
+#
+# HOW IT WORKS
+#   Runs COMMAND once. Then enters a loop: waits for inotify event on
+#   FILE, clears the screen, re-runs COMMAND. Loop exits when COMMAND
+#   fails — you see the error, fix the file, re-launch.
+#
+# USAGE
+#   iwatch FILE COMMAND...
+#
+# EXAMPLES
+#   iwatch src/main.c 'make && ./a.out'
+#   iwatch ~/.wostore wo.c
+#
+# EXIT CODES
+#   Same as COMMAND — loop stops on COMMAND failure and propagates its
+#   exit code. 1 if FILE does not exist.
+#
+# DEPENDENCIES
+#   inotifywait (inotify-tools)
+
+die() { echo "$*" >&2; exit 1; }
+usage() { echo "usage: iwatch FILE COMMAND..." >&2; exit 1; }
+has_arguments() { [[ $# -gt 0 ]]; }
+file_exists() { [[ -e $1 ]]; }
+
+has_arguments "$@" || usage
+FILE=$1; shift
+file_exists "$FILE" || die "iwatch: $FILE not found"
+
+while clear; "$@"; do
+    inotifywait -qq -e close_write,modify "$FILE" 2>/dev/null
+done

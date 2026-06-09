@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# iiwatch — run command on file change, F5, or midnight
+#
+# WHAT IT DOES
+#   Watches FILE for writes via inotify. When the file changes, or when
+#   F5 is pressed, or at midnight, re-runs COMMAND.
+#   Event-driven with manual and calendar-based re-run triggers.
+#
+# WHY
+#   Config or data store changes trigger a viewer or processor.
+#   F5 re-runs without a file change. Midnight picks up daily resets.
+#
+# HOW IT WORKS
+#   Runs COMMAND once. Then enters a loop waiting for any trigger:
+#     1. FILE write (reported by inotify)
+#     2. F5 keypress (escape sequence \e[15~ on stdin)
+#     3. Midnight (date change detected each poll cycle)
+#   On any trigger: kills the inotify watcher, re-runs COMMAND, and
+#   loops back to waiting. Midnight advance updates the stored date to
+#   avoid re-triggering on the same cycle.
+#
+# USAGE
+#   iiwatch FILE COMMAND...
+#
+# EXAMPLES
+#   iiwatch ~/.wostore wo.c
+#   iiwatch src/main.c 'make && ./a.out'
+#
+# EXIT CODES
+#   1 if FILE does not exist. Otherwise runs until interrupted (Ctrl-C).
+#
+# DEPENDENCIES
+#   inotifywait (inotify-tools)
+
+die() { echo "$*" >&2; exit 1; }
+usage() { echo "usage: iiwatch FILE COMMAND..." >&2; exit 1; }
+has_arguments() { [[ $# -gt 0 ]]; }
+got() { [[ -n $1 ]]; }
+no()  { [[ -z $1 ]]; }
+file_exists()  { [[ -e $1 ]]; }
+pid_exists()   { kill -0 "$1" 2>/dev/null; }
+is_new_day()   { [[ $(date +%F) != "$LAST_DATE" ]]; }
+
+check_f5() {
+    local KEY
+    local REST
+
+    read -rsn1 -t0.5 KEY || return 1
+    if [[ $KEY != $'\e' ]]; then return 1; fi
+    read -rsn4 -t0.1 REST
+    [[ $REST == "[15~" ]]
+}
+
+start_watcher() {
+    inotifywait -qq -e close_write,modify "$FILE" 2>/dev/null &
+    INOTIFY_PID=$!
+}
+
+stop_watcher() {
+    if no "$INOTIFY_PID"; then return; fi
+    kill "$INOTIFY_PID" 2>/dev/null
+    wait "$INOTIFY_PID" 2>/dev/null
+}
+
+wait_for_trigger() {
+    start_watcher
+
+    while pid_exists "$INOTIFY_PID"; do
+        if is_new_day; then
+            LAST_DATE=$(date +%F)
+            stop_watcher
+            return
+        fi
+        if check_f5; then
+            stop_watcher
+            return
+        fi
+    done
+
+    stop_watcher
+}
+
+# --- Main ---
+
+has_arguments "$@" || usage
+FILE=$1; shift
+file_exists "$FILE" || die "iiwatch: $FILE not found"
+
+LAST_DATE=$(date +%F)
+INOTIFY_PID=
+
+trap stop_watcher EXIT
+
+while clear; do
+    "$@"
+    wait_for_trigger
+done
