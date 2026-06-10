@@ -1,0 +1,69 @@
+#!/bin/sh
+# cdexec — chain-cd into directories, execute last argument
+#
+# WHAT IT DOES
+# Chains directory changes then executes a command in the final directory.
+# Each argument except the last is a path to cd into in sequence.
+# The last argument is exec'd in the resulting directory.
+# A --dry-run flag previews the full chain without executing.
+#
+# WHY
+# Primary: run a binary in a specific working directory without typing
+# the full absolute path.  Each positional arg is a path component;
+# together they form a chain to cd through.  The final arg is the
+# binary relative to that final directory.
+#
+# Secondary: split a long path into its components so individual parts
+# can be copy-pasted, reordered, or manually slashed.  One command
+# replaces mentally stitching "cd ~/games/Factorio/bin/x64 && ./factorio".
+# Dry-run mode lets you verify the chain before executing.
+#
+# HOW IT WORKS
+# Parses optional flags, then iterates positional arguments: each one
+# up to the second-to-last is a directory (cd into it), the last one
+# is the executable (exec it).  Paths are printed in dry-run mode.
+#
+# USAGE
+#   cdexec [-n|--dry-run] <dir>... <executable>
+#
+# EXAMPLES
+#   cdexec ~/games Factorio bin/x64 factorio
+#   cdexec -n /opt myapp ./start.sh
+
+set -e
+
+DRY=false
+
+die()       { printf '%s\n' "$1" >&2; exit 1; }
+has_args()  { [ $# -gt 0 ]; }
+is_dryrun() { $DRY; }
+
+main() {
+    while :; do
+        case $1 in
+            -n|--dry-run) DRY=true; shift ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    has_args "$@" || die "usage: cdexec [-n] <dir>... <executable>"
+
+    while [ $# -gt 1 ]; do
+        if is_dryrun; then
+            printf 'cd %s\n' "$1"
+        fi
+        cd -- "$1" || die "cd failed: $1"
+        shift
+    done
+
+    EXEC=${1#./}
+
+    if is_dryrun; then
+        printf 'exec ./%s\n' "$EXEC"
+        exit 0
+    fi
+    exec "./$EXEC"
+}
+
+main "$@"

@@ -13,6 +13,7 @@ Shell tools organized into useful **screw** and **toys**.
 | `cidr-host` | Calculate host IP within CIDR prefix (Tofu/Terraform compatible) |
 | `cidr-subnet` | Calculate subnet within CIDR prefix (Tofu/Terraform compatible) |
 | `cpstamped` | Copy files with Unix timestamp suffix |
+| `cdexec` | Chain-cd through directories, exec last argument |
 | `cronic` | Run a command, log output, show only on failure |
 | `cycle` | Return next item in a list, wrapping at end |
 | `cyclines` | Reorder lines by positional swaps |
