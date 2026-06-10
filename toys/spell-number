@@ -1,0 +1,975 @@
+#!/usr/bin/env -S bash -euo pipefail
+# spell-number — spell numbers as words in four languages
+#
+# WHAT IT DOES
+#
+# Converts numbers (including decimals) to pronounceable text in DE, EN, FR,
+# and RU. Handles locale-specific separators automatically:
+#
+#   DE/FR/RU: 1.234,56  → drei-hundert-vier-und-zwanzig Millionen ... Komma fünf sechs
+#   EN:       1,234.56  → one-million two-hundred-thirty-four-thousand ... point five six
+#
+# Output format: hyphens within each 3-digit-block+scale unit, spaces between
+# units and around the decimal word.
+#
+# Supports 0 to 10^66-1 (DE/FR), 10^63-1 (EN), 10^33-1 (RU).
+#
+# USAGE
+#
+#   spell-number [-l de|en|fr|ru] [NUMBER]
+#
+# Reads NUMBER from stdin if not given. Default language: de.
+#
+# EXAMPLES
+#
+#   spell-number 42                            # zwei-und-vierzig
+#   spell-number -l en 42                      # forty-two
+#   spell-number -l fr 71                      # soixante-et-onze
+#   spell-number -l ru 1000                    # одна-тысяча
+#   spell-number -l de 1.040,43                # ein-tausend vierzig Komma vier drei
+#   spell-number -l en 1,040.43                # one-thousand forty point four three
+#   echo "3,14" | spell-number -l fr           # trois virgule un quatre
+#   echo "-5"   | spell-number -l en           # negative five
+#
+# EXIT CODES
+#
+#   0   Success
+#   1   Invalid input
+
+# ── Helpers ──
+
+die()          { echo "$1" >&2; exit 1; }
+got()          { [[ -n $1 ]]; }
+no()           { [[ -z $1 ]]; }
+
+usage() {
+    sed -n '/^# WHAT IT DOES/,/^# EXIT CODES/p' "$0" | sed 's/^# *//'
+}
+
+# ── Predicates ──
+
+is_negative()         { [[ $1 == -* ]]; }
+is_valid_integer()    { [[ $1 =~ ^[0-9]+$ ]]; }
+is_zero()             { [[ $1 == 0 ]]; }
+is_unit_part()        { [[ $1 -eq 1 ]]; }
+is_feminine_scale()   { [[ $1 -eq 1 ]]; }
+has_decimal_comma()   { [[ $1 == *,* ]]; }
+has_decimal_point()   { [[ $1 == *.* ]]; }
+is_grouping_dot()     { [[ ${#1} -eq 3 && $2 == *.??? ]]; }
+is_seventies()        { [[ $1 -ge 70 && $1 -lt 80 ]]; }
+is_eighty()           { [[ $1 -eq 80 ]]; }
+is_teen_range()       { [[ $1 -ge 11 && $1 -le 19 ]]; }
+is_two_to_four()      { [[ $1 -ge 2 && $1 -le 4 ]]; }
+hundreds_are_plural() { [[ $1 -gt 1 && $2 -eq 0 ]]; }
+
+# ── Language lookups ──
+
+neg_prefix() {
+    case $1 in
+        de) echo "minus"    ;;
+        en) echo "negative" ;;
+        fr) echo "moins"    ;;
+        ru) echo "минус"    ;;
+    esac
+}
+
+decimal_word() {
+    case $1 in
+        de) echo "Komma"    ;;
+        en) echo "point"    ;;
+        fr) echo "virgule"  ;;
+        ru) echo "запятая"  ;;
+    esac
+}
+
+# ── Digit tables (fraction spelling via nameref) ──
+
+# shellcheck disable=SC2034 # used via nameref in spell_fraction
+declare -A DIGIT_DE DIGIT_EN DIGIT_FR DIGIT_RU
+# shellcheck disable=SC2034
+DIGIT_DE=(
+    [0]="null"
+    [1]="eins"
+    [2]="zwei"
+    [3]="drei"
+    [4]="vier"
+    [5]="fünf"
+    [6]="sechs"
+    [7]="sieben"
+    [8]="acht"
+    [9]="neun"
+)
+# shellcheck disable=SC2034
+DIGIT_EN=(
+    [0]="zero"
+    [1]="one"
+    [2]="two"
+    [3]="three"
+    [4]="four"
+    [5]="five"
+    [6]="six"
+    [7]="seven"
+    [8]="eight"
+    [9]="nine"
+)
+# shellcheck disable=SC2034
+DIGIT_FR=(
+    [0]="zéro"
+    [1]="un"
+    [2]="deux"
+    [3]="trois"
+    [4]="quatre"
+    [5]="cinq"
+    [6]="six"
+    [7]="sept"
+    [8]="huit"
+    [9]="neuf"
+)
+# shellcheck disable=SC2034
+DIGIT_RU=(
+    [0]="ноль"
+    [1]="один"
+    [2]="два"
+    [3]="три"
+    [4]="четыре"
+    [5]="пять"
+    [6]="шесть"
+    [7]="семь"
+    [8]="восемь"
+    [9]="девять"
+)
+
+# ── English word tables ──
+
+EN_ONES=(
+    zero
+    one
+    two
+    three
+    four
+    five
+    six
+    seven
+    eight
+    nine
+    ten
+    eleven
+    twelve
+    thirteen
+    fourteen
+    fifteen
+    sixteen
+    seventeen
+    eighteen
+    nineteen
+)
+EN_TENS=(
+    _
+    _
+    twenty
+    thirty
+    forty
+    fifty
+    sixty
+    seventy
+    eighty
+    ninety
+)
+EN_SCALES=(
+    _
+    thousand
+    million
+    billion
+    trillion
+    quadrillion
+    quintillion
+    sextillion
+    septillion
+    octillion
+    nonillion
+    decillion
+    undecillion
+    duodecillion
+    tredecillion
+    quattuordecillion
+    quindecillion
+    sexdecillion
+    septendecillion
+    octodecillion
+    novemdecillion
+    vigintillion
+)
+
+# ── German word tables ──
+
+DE_ONES=(
+    null
+    eins
+    zwei
+    drei
+    vier
+    fünf
+    sechs
+    sieben
+    acht
+    neun
+    zehn
+    elf
+    zwölf
+    dreizehn
+    vierzehn
+    fünfzehn
+    sechzehn
+    siebzehn
+    achtzehn
+    neunzehn
+)
+DE_TENS=(
+    _
+    _
+    zwanzig
+    dreißig
+    vierzig
+    fünfzig
+    sechzig
+    siebzig
+    achtzig
+    neunzig
+)
+DE_SCALES=(
+    _
+    tausend
+    Million
+    Milliarde
+    Billion
+    Billiarde
+    Trillion
+    Trilliarde
+    Quadrillion
+    Quadrilliarde
+    Quintillion
+    Quintilliarde
+    Sextillion
+    Sextilliarde
+    Septillion
+    Septilliarde
+    Oktillion
+    Oktilliarde
+    Nonillion
+    Nonilliarde
+    Dezillion
+    Dezilliarde
+    Vigintillion
+)
+DE_SCALES_PL=(
+    _
+    tausend
+    Millionen
+    Milliarden
+    Billionen
+    Billiarden
+    Trillionen
+    Trilliarden
+    Quadrillionen
+    Quadrilliarden
+    Quintillionen
+    Quintilliarden
+    Sextillionen
+    Sextilliarden
+    Septillionen
+    Septilliarden
+    Oktillionen
+    Oktilliarden
+    Nonillionen
+    Nonilliarden
+    Dezillionen
+    Dezilliarden
+    Vigintillionen
+)
+
+# ── French word tables ──
+
+FR_ONES=(
+    zéro
+    un
+    deux
+    trois
+    quatre
+    cinq
+    six
+    sept
+    huit
+    neuf
+    dix
+    onze
+    douze
+    treize
+    quatorze
+    quinze
+    seize
+    dix-sept
+    dix-huit
+    dix-neuf
+)
+FR_TENS=(
+    _
+    _
+    vingt
+    trente
+    quarante
+    cinquante
+    soixante
+    soixante-dix
+    quatre-vingts
+    quatre-vingt-dix
+)
+FR_SCALES=(
+    _
+    mille
+    million
+    milliard
+    billion
+    billiard
+    trillion
+    trilliard
+    quadrillion
+    quadrilliard
+    quintillion
+    quintilliard
+    sextillion
+    sextilliard
+    septillion
+    septilliard
+    octillion
+    octilliard
+    nonillion
+    nonilliard
+    décillion
+    décilliard
+    vigintillion
+)
+FR_SCALES_PL=(
+    _
+    mille
+    millions
+    milliards
+    billions
+    billiards
+    trillions
+    trilliards
+    quadrillions
+    quadrilliards
+    quintillions
+    quintilliards
+    sextillions
+    sextilliards
+    septillions
+    septilliards
+    octillions
+    octilliards
+    nonillions
+    nonilliards
+    décillions
+    décilliards
+    vigintillions
+)
+
+# ── Russian word tables ──
+
+RU_ONES_M=(
+    _
+    один
+    два
+    три
+    четыре
+    пять
+    шесть
+    семь
+    восемь
+    девять
+)
+RU_ONES_F=(
+    _
+    одна
+    две
+    три
+    четыре
+    пять
+    шесть
+    семь
+    восемь
+    девять
+)
+RU_TEENS=(
+    десять
+    одиннадцать
+    двенадцать
+    тринадцать
+    четырнадцать
+    пятнадцать
+    шестнадцать
+    семнадцать
+    восемнадцать
+    девятнадцать
+)
+RU_TENS=(
+    _
+    _
+    двадцать
+    тридцать
+    сорок
+    пятьдесят
+    шестьдесят
+    семьдесят
+    восемьдесят
+    девяносто
+)
+RU_HUNDREDS=(
+    _
+    сто
+    двести
+    триста
+    четыреста
+    пятьсот
+    шестьсот
+    семьсот
+    восемьсот
+    девятьсот
+)
+RU_SCALES=(
+    _
+    тысяча
+    миллион
+    миллиард
+    триллион
+    квадриллион
+    квинтиллион
+    секстиллион
+    септиллион
+    октиллион
+    нониллион
+    дециллион
+)
+RU_SCALES_PLURAL=(
+    _
+    тысяч
+    миллионов
+    миллиардов
+    триллионов
+    квадриллионов
+    квинтиллионов
+    секстиллионов
+    септиллионов
+    октиллионов
+    нониллионов
+    дециллионов
+)
+RU_SCALES_TWO=(
+    _
+    тысячи
+    миллиона
+    миллиарда
+    триллиона
+    квадриллиона
+    квинтиллиона
+    секстиллиона
+    септиллиона
+    октиллиона
+    нониллиона
+    дециллиона
+)
+
+# ── Chunk iteration (shared by all languages) ──
+# Decompose N into 3-digit groups and spell each via language chunk function
+
+spell_chunk() {
+    local LANG=$1
+    local PART=$2
+    local SCALE=$3
+    local IS_LAST=$4
+
+    case $LANG in
+        de) spell_de_chunk "$PART" "$SCALE" "$IS_LAST" ;;
+        en) spell_en_chunk "$PART" "$SCALE" ;;
+        fr) spell_fr_chunk "$PART" "$SCALE" ;;
+        ru) spell_ru_chunk "$PART" "$SCALE" ;;
+    esac
+}
+
+process_chunks() {
+    # Builds output right-to-left (least significant chunk first), using `|`
+    # as an internal separator.  Each spell_XX_chunk call returns one chunk's
+    # words; the caller's sed pipeline replaces `|` with spaces.
+    local LANG=$1 N=$2 OUT="" SCALE=0 PART
+
+    while [[ -n $N ]]; do
+        if [[ ${#N} -gt 3 ]]; then
+            PART=$((10#${N: -3}))
+            N=${N:0:${#N}-3}
+        else
+            PART=$((10#$N))
+            N=""
+        fi
+        if (( PART > 0 )); then
+            local IS_LAST=0 CHUNK
+            [[ -z $N ]] && IS_LAST=1
+            CHUNK=$(spell_chunk "$LANG" "$PART" "$SCALE" "$IS_LAST")
+            CHUNK=${CHUNK% }
+            OUT="$CHUNK|"$OUT
+        fi
+        ((SCALE++))
+    done
+    echo "${OUT% }"
+}
+
+# ── EN: integer spelling ──
+
+spell_en_chunk() {
+    local PART=$1
+    local SCALE=$2
+    local BLOCK=""
+    local H=$(( PART / 100 ))
+    local R=$(( PART % 100 ))
+
+    if (( H > 0 )); then
+        BLOCK+="${EN_ONES[$H]} hundred "
+    fi
+    if (( R > 0 )); then
+        if (( R < 20 )); then
+            BLOCK+="${EN_ONES[$R]} "
+        else
+            local T=$(( R / 10 ))
+            local O=$(( R % 10 ))
+            BLOCK+="${EN_TENS[$T]}"
+            if (( O > 0 )); then BLOCK+="-${EN_ONES[$O]}"; fi
+            BLOCK+=" "
+        fi
+    fi
+    if (( SCALE > 0 )); then
+        BLOCK+="${EN_SCALES[$SCALE]} "
+    fi
+    echo "$BLOCK"
+}
+
+spell_en() {
+    local N=$1
+
+    if is_zero "$N"; then echo "zero"; return 0; fi
+    process_chunks en "$N" | sed 's/  */-/g; s/|/ /g; s/ *$//'
+}
+
+# ── DE: integer spelling ──
+# German has special overwrite rules for "eins" vs "ein" and scale agreement:
+#   - Number 1 alone → "eins", in compound → "ein"
+#   - Scale 1, part 1 → "ein tausend" (overwrites body)
+#   - Scale 2+, part 1 → "eine Million/Milliarde…" (overwrites body)
+
+de_tens_ones() {
+    local R=$1
+
+    if (( R < 20 )); then
+        echo "${DE_ONES[$R]}"
+        return 0
+    fi
+
+    local T=$(( R / 10 ))
+    local O=$(( R % 10 ))
+    local UW=${DE_ONES[$O]}
+    if [[ $O -eq 1 ]]; then UW="ein"; fi
+
+    if (( O == 0 )); then echo "${DE_TENS[$T]}"; return; fi
+    echo "${UW}-und-${DE_TENS[$T]}"
+}
+
+spell_de_chunk() {
+    local PART=$1
+    local SCALE=$2
+    local IS_LAST=$3
+
+    # Scale 1, part 1: "ein tausend" (body overwritten)
+    if is_unit_part "$PART" && [[ $SCALE -eq 1 ]]; then
+        echo "ein tausend "
+        return 0
+    fi
+
+    # Scale 2+, part 1: "eine Million/Milliarde…" (body overwritten)
+    if is_unit_part "$PART" && (( SCALE > 1 )); then
+        echo "eine ${DE_SCALES[$SCALE]} "
+        return 0
+    fi
+
+    # Scale 0, part 1, last: "eins" (body overwritten)
+    if is_unit_part "$PART" && is_zero "$SCALE" && [[ $IS_LAST -eq 1 ]]; then
+        echo "eins"
+        return 0
+    fi
+
+    # Normal path: hundreds + tens/ones + scale suffix
+    local BLOCK=""
+    local H=$(( PART / 100 ))
+    local R=$(( PART % 100 ))
+
+    if (( H > 0 )); then
+        if (( H == 1 )); then BLOCK+="ein hundert"
+        else BLOCK+="${DE_ONES[$H]} hundert"
+        fi
+    fi
+    if (( R > 0 )); then
+        if [[ -n $BLOCK ]]; then BLOCK+=" "; fi
+        BLOCK+=$(de_tens_ones "$R")
+    fi
+    if (( SCALE == 1 )); then
+        BLOCK+=" tausend "
+    elif (( SCALE > 1 )); then
+        BLOCK+=" ${DE_SCALES_PL[$SCALE]} "
+    fi
+    echo "$BLOCK"
+}
+
+spell_de() {
+    local N=$1
+
+    if is_zero "$N"; then echo "null"; return 0; fi
+    process_chunks de "$N" | sed 's/  */-/g; s/|/ /g; s/ *$//'
+}
+
+# ── FR: integer spelling ──
+# French 70-79: soixante-dix, 80: quatre-vingts, 81-89: quatre-vingt-X,
+# 90-99: quatre-vingt-dix
+
+fr_tens_ones() {
+    local R=$1
+
+    if is_seventies "$R"; then
+        local SUB=$(( R - 60 ))
+        if (( SUB == 11 )); then echo "soixante et onze"; return 0; fi
+        echo "soixante-${FR_ONES[$SUB]}"
+        return 0
+    fi
+
+    if (( R >= 81 )); then
+        local SUB=$(( R - 80 ))
+        if (( SUB == 1 )); then echo "quatre-vingt-un"; return 0; fi
+        echo "quatre-vingt-${FR_ONES[$SUB]}"
+        return 0
+    fi
+
+    if is_eighty "$R"; then echo "quatre-vingts"; return 0; fi
+
+    if (( R < 20 )); then echo "${FR_ONES[$R]}"; return; fi
+
+    # 20-69
+    local T=$(( R / 10 ))
+    local O=$(( R % 10 ))
+    local OUT=${FR_TENS[$T]}
+    if (( O == 1 )); then
+        OUT+=" et un"
+    elif (( O > 0 )); then
+        OUT+="-${FR_ONES[$O]}"
+    fi
+    echo "$OUT"
+}
+
+spell_fr_chunk() {
+    local PART=$1
+    local SCALE=$2
+    local BLOCK=""
+    local H=$(( PART / 100 ))
+    local R=$(( PART % 100 ))
+
+    if (( H > 0 )); then
+        if (( H == 1 )); then BLOCK+="cent "
+        else BLOCK+="${FR_ONES[$H]} cent "
+        fi
+        if [[ $SCALE -eq 0 ]] && hundreds_are_plural "$H" "$R"; then
+            BLOCK="${BLOCK%cent }cents "
+        fi
+    fi
+    if (( R > 0 )); then
+        local TENS_RESULT
+        TENS_RESULT=$(fr_tens_ones "$R")
+        if (( SCALE > 0 )) && [[ $TENS_RESULT == "quatre-vingts" ]]; then
+            TENS_RESULT="quatre-vingt"
+        fi
+        BLOCK+="$TENS_RESULT "
+    fi
+    if (( SCALE == 1 )); then
+        BLOCK+="mille "
+    elif (( SCALE > 1 && PART == 1 )); then
+        BLOCK+="${FR_SCALES[$SCALE]} "
+    elif (( SCALE > 1 )); then
+        BLOCK+="${FR_SCALES_PL[$SCALE]} "
+    fi
+    echo "$BLOCK"
+}
+
+spell_fr() {
+    local N=$1
+
+    if is_zero "$N"; then echo "zéro"; return 0; fi
+    process_chunks fr "$N" | sed 's/  */-/g; s/|/ /g; s/ *$//'
+}
+
+# ── RU: integer spelling ──
+# Scales have grammatical agreement: тысяча, тысячи, тысяч
+# Gender forms: одна/один for feminine/masculine units
+
+ru_scale_agreement() {
+    local PART=$1
+    local SCALE=$2
+    local P10=$(( PART % 10 ))
+    local P100=$(( PART % 100 ))
+
+    if is_teen_range "$P100"; then
+        echo "${RU_SCALES_PLURAL[$SCALE]} "
+    elif (( P10 == 1 )); then
+        echo "${RU_SCALES[$SCALE]} "
+    elif is_two_to_four "$P10"; then
+        echo "${RU_SCALES_TWO[$SCALE]} "
+    else
+        echo "${RU_SCALES_PLURAL[$SCALE]} "
+    fi
+}
+
+ru_ones_gender() {
+    local DIGIT=$1
+    local SCALE=$2
+
+    if is_feminine_scale "$SCALE"; then
+        echo "${RU_ONES_F[$DIGIT]} "
+    else
+        echo "${RU_ONES_M[$DIGIT]} "
+    fi
+}
+
+spell_ru_chunk() {
+    local PART=$1
+    local SCALE=$2
+    local BLOCK=""
+    local H=$(( PART / 100 ))
+    local R=$(( PART % 100 ))
+
+    if (( H > 0 )); then BLOCK+="${RU_HUNDREDS[$H]} "; fi
+
+    if (( R >= 20 )); then
+        local T=$(( R / 10 ))
+        local O=$(( R % 10 ))
+        BLOCK+="${RU_TENS[$T]} "
+        if (( O > 0 )); then
+            BLOCK+=$(ru_ones_gender "$O" "$SCALE")
+        fi
+    elif (( R >= 10 )); then
+        BLOCK+="${RU_TEENS[$(( R - 10 ))]} "
+    elif (( R > 0 )); then
+        BLOCK+=$(ru_ones_gender "$R" "$SCALE")
+    fi
+
+    if (( SCALE > 0 )); then
+        BLOCK+=$(ru_scale_agreement "$PART" "$SCALE")
+    fi
+    echo "$BLOCK"
+}
+
+spell_ru() {
+    local N=$1
+
+    if is_zero "$N"; then echo "ноль"; return 0; fi
+    process_chunks ru "$N" | sed 's/  */-/g; s/|/ /g; s/ *$//'
+}
+
+# ── Number parsing ──
+# DE/FR/RU: decimal comma, grouping dot
+# EN:       decimal point, grouping comma
+# Output: "INT|FRAC" — FRAC empty when no fractional part
+
+parse_european() {
+    local NUM=$1
+    local INT
+    local FRAC
+    local AFTER_DOT
+
+    if has_decimal_comma "$NUM"; then
+        INT=${NUM%%,*}
+        FRAC=${NUM#*,}
+    elif has_decimal_point "$NUM"; then
+        AFTER_DOT=${NUM#*.}
+        if is_grouping_dot "$AFTER_DOT" "$NUM"; then
+            NUM="${NUM%.*}$AFTER_DOT"
+        fi
+        INT=${NUM%.*}
+        FRAC=${NUM#*.}
+        # FRAC == INT means no separator was found — restore to empty
+        if [[ $FRAC == "$INT" ]]; then FRAC=""; fi
+    else
+        INT=$NUM
+        FRAC=""
+    fi
+    INT=${INT//./}
+    echo "$INT|$FRAC"
+}
+
+parse_english() {
+    local NUM=$1
+    local INT
+    local FRAC
+    NUM=$(echo "$NUM" | sed 's/,\([0-9][0-9][0-9]\)/\1/g')
+    INT=${NUM%%.*}
+    FRAC=${NUM#*.}
+    if [[ $FRAC == "$INT" ]]; then FRAC=""; fi
+    echo "$INT|$FRAC"
+}
+
+# ── Fraction spelling ──
+
+spell_fraction() {
+    local LANG=$1
+    local FRAC=$2
+    local WORDS=""
+    local D
+    local W
+    local -n DIGITS=DIGIT_${LANG^^}
+
+    for (( I=0; I<${#FRAC}; I++ )); do
+        D=${FRAC:$I:1}
+        W=${DIGITS[$D]}
+        WORDS+="$W "
+    done
+    echo "${WORDS% }"
+}
+
+# ── Orchestration ──
+
+LANG=de
+ARGS=()
+
+parse_flags() {
+    LANG=de
+    ARGS=()
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -l)
+                shift
+                case ${1:-} in
+                    de|en|fr|ru) LANG=$1 ;;
+                    *) die "spell-number: invalid language '$1' (use de|en|fr|ru)" ;;
+                esac
+                ;;
+            -l*) LANG=${1#-l} ;;
+            -h|--help) usage; exit 0 ;;
+            *) ARGS+=("$1") ;;
+        esac
+        shift
+    done
+}
+
+read_input() {
+    local NUM
+
+    if (( ${#ARGS[@]} > 0 )); then
+        NUM=${ARGS[0]}
+    else
+        read -r NUM || die "no input"
+    fi
+    NUM=${NUM//[[:space:]]/}
+    got "$NUM" || die "empty input"
+    echo "$NUM"
+}
+
+strip_sign() {
+    local NUM=$1
+
+    if is_negative "$NUM"; then
+        echo "1|${NUM#-}"
+    else
+        echo "|${NUM}"
+    fi
+}
+
+split_number() {
+    local LANG=$1
+    local NUM=$2
+
+    case $LANG in
+        de|fr|ru) parse_european "$NUM" ;;
+        en)       parse_english "$NUM" ;;
+    esac
+}
+
+normalize_integer() {
+    local VALUE=$1
+
+    is_valid_integer "$VALUE" || die "invalid number"
+    VALUE=${VALUE#0}
+    while [[ $VALUE == 0* ]]; do VALUE=${VALUE#0}; done
+    VALUE=${VALUE:-0}
+    echo "$VALUE"
+}
+
+spell_integer() {
+    local LANG=$1
+    local VALUE=$2
+
+    case $LANG in
+        de) spell_de "$VALUE" ;;
+        en) spell_en "$VALUE" ;;
+        fr) spell_fr "$VALUE" ;;
+        ru) spell_ru "$VALUE" ;;
+    esac
+}
+
+apply_neg_prefix() {
+    local SIGN=$1
+    local LANG=$2
+    local WORD=$3
+    local PREFIX
+
+    if got "$SIGN"; then
+        PREFIX=$(neg_prefix "$LANG")
+        echo "$PREFIX $WORD"
+    else
+        echo "$WORD"
+    fi
+}
+
+emit_result() {
+    local LANG=$1
+    local INT_WORD=$2
+    local FRAC=$3
+    local DEC_WORD
+    local FRAC_SPELLED
+
+    if no "$FRAC"; then
+        echo "$INT_WORD"
+        return 0
+    fi
+    is_valid_integer "$FRAC" || die "invalid decimal"
+    DEC_WORD=$(decimal_word "$LANG")
+    FRAC_SPELLED=$(spell_fraction "$LANG" "$FRAC")
+    echo "$INT_WORD $DEC_WORD $FRAC_SPELLED"
+}
+
+main() {
+    local NUM
+    local NEG=""
+    local STRIPPED
+    local PARSED
+    local INT
+    local FRAC
+    local INT_WORD
+
+    parse_flags "$@"
+    NUM=$(read_input)
+    STRIPPED=$(strip_sign "$NUM")
+    NEG=${STRIPPED%|*}
+    NUM=${STRIPPED#*|}
+    PARSED=$(split_number "$LANG" "$NUM")
+    INT=${PARSED%|*}
+    FRAC=${PARSED#*|}
+    INT=$(normalize_integer "$INT")
+    INT_WORD=$(spell_integer "$LANG" "$INT")
+    INT_WORD=$(apply_neg_prefix "$NEG" "$LANG" "$INT_WORD")
+    emit_result "$LANG" "$INT_WORD" "$FRAC"
+}
+
+main "$@"
