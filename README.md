@@ -43,5 +43,5 @@ C source (no script): `prefix.c`
 |------|---------|
 | `memento-mori-cal` | Visualize your life in weeks (ASCII grid) |
 | `worth-the-time-xkcd-1205` | Calculate if automation saves time |
-| `spell-number-{en,de,fr,ru}` | Convert integers to words |
+| `spell-number` | Convert integers to words (`-l en|de|fr|ru`) |
 | `spell-topic` | Multilingual vocabulary cheat sheet |
