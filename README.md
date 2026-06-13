@@ -24,6 +24,7 @@ Shell tools organized into useful **screw** and **toys**.
 | `mkdire` | mkdir parent dirs, then execute command |
 | `mkpin` | Name a directory, open files from anywhere with tab completion |
 | `mutexec` | Clean wrapper around &>/dev/null |
+| `nugget` | PKGBUILD-style downloader (URLs, archives, VCS) |
 | `pdsc` | List process descendants |
 | `rssh` | Sync directory to remote host, run commands |
 | `slay` | Kill processes with SIGKILL |

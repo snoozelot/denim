@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# nugget — PKGBUILD-style downloader
+#
+# WHAT IT DOES
+# Downloads URLs into the current directory using PKGBUILD fetch syntax.
+# Single files land as ./filename. Git repos as ./repo-name/.
+# Archives extract in place. GitHub blob URLs auto-convert to raw.
+# name:: prefix renames the target.
+#
+# WHY
+# One command for any source type — file, archive, git, bzr, hg, fossil, svn.
+# PKGBUILD syntax is already designed for this: #fragment pinning, name::
+# prefix. nugget reuses it as a standalone downloader.
+#
+# HOW IT WORKS
+# Single file: curl -o. Archive: curl + tar/unzip. VCS: clone/checkout.
+# name:: prefix creates subdirectory. -o sets base. -v shows commands. -n dry-run.
+#
+# USAGE
+#   nugget [-v] [-n] [-o DIR] URL [URL...]
+#   nugget -h
+#
+# OPTIONS
+#   -o DIR    Output directory (default: .)
+#   -v        Show commands being run
+#   -n        Dry-run: print what would download without doing it
+#
+# URL FORMATS
+#   https://example.com/file           curl download
+#   https://example.com/archive.tar.gz download + extract
+#   git+https://example.com/repo       git clone
+#   bzr+https://example.com/repo       bzr branch
+#   hg+https://example.com/repo        hg clone
+#   fossil+https://example.com/repo    fossil clone
+#   svn+https://example.com/repo       svn checkout
+#   name::url                          use "name" as subdirectory
+#
+# FRAGMENTS (PKGBUILD per-VCS pinning)
+#   git:     #branch=X, #tag=X, #commit=X
+#   bzr:     #revision=X
+#   hg:      #branch=X, #tag=X, #revision=X
+#   fossil:  #branch=X, #commit=X, #tag=X
+#   svn:     #revision=X
+#
+# EXAMPLES
+#   nugget https://example.com/helper.c
+#   nugget -v -o vendor git+https://github.com/user/repo#tag=v1.0
+#   nugget -n https://github.com/user/repo/blob/main/lib.c
+#
+# EXIT CODES
+#   0   All URLs fetched successfully
+#   1   Any URL failed to fetch or process
+#
+# DEPENDENCIES
+#   curl, git, bzr, hg, fossil, svn (per VCS type used)
+
+set -euo pipefail
+
+SCRIPT=${0##*/}
+die() { echo "${SCRIPT}: $*" >&2; exit 1; }
+no()  { [[ -z $1 ]]; }
+
+VERBOSE=""
+DRYRUN=""
+
+is_verbose() { [[ -n $VERBOSE ]]; }
+is_dryrun()  { [[ -n $DRYRUN ]]; }
+urls_given() { [[ $# -gt 0 ]]; }
+
+run() {
+    if is_verbose; then echo "+ $*" >&2; fi
+    if is_dryrun; then return 0; fi
+    "$@"
+}
+
+# ============================================================================
+# URL predicates and transforms
+# ============================================================================
+
+is_url()         { [[ $1 == http://* ]] || [[ $1 == https://* ]]; }
+is_archive_file(){ [[ $1 == *.tar.gz ]] || [[ $1 == *.tgz ]] || [[ $1 == *.tar.bz2 ]] || [[ $1 == *.zip ]]; }
+is_pinned()      { [[ $1 == *=* ]]; }
+
+vcs_type() {
+    case $1 in
+        git+*)    echo "git"    ;;
+        bzr+*)    echo "bzr"    ;;
+        hg+*)     echo "hg"     ;;
+        fossil+*) echo "fossil" ;;
+        svn+*)    echo "svn"    ;;
+        *)        echo ""       ;;
+    esac
+}
+
+is_vcs_url() { [[ -n $(vcs_type "$1") ]]; }
+url_file()   { local F; F=${1##*/}; echo "${F%%\?*}"; }
+repo_name()  { local N; N=${1##*/}; N=${N%.git}; N=${N%/}; echo "$N"; }
+
+# Convert GitHub blob URLs to raw.githubusercontent.com URLs
+raw_url() {
+    [[ $1 =~ ^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$ ]] \
+        && echo "https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}" \
+        || echo "$1"
+}
+
+# ============================================================================
+# Download helpers
+# ============================================================================
+
+curl_to() {
+    local URL
+    local DIR
+    local FILE
+
+    URL=$1
+    DIR=$2
+    FILE=$(url_file "$URL")
+    mkdir -p "$DIR"
+    run curl -fsSL --connect-timeout 10 --retry 2 -o "${DIR}/${FILE}" "$URL" \
+        || die "download failed: $URL"
+    [[ -s ${DIR}/${FILE} ]] || die "empty download: $URL"
+    echo "${DIR}/${FILE}"
+}
+
+extract_archive() {
+    local FILE
+    local DIR
+
+    FILE=$1
+    DIR=$2
+    case $FILE in
+        *.tar.gz|*.tgz)
+            run tar xzf "$FILE" -C "$DIR" --strip-components=1 \
+                || run tar xzf "$FILE" -C "$DIR" ;;
+        *.tar.bz2)
+            run tar xjf "$FILE" -C "$DIR" --strip-components=1 \
+                || run tar xjf "$FILE" -C "$DIR" ;;
+        *.zip)  run unzip -qo "$FILE" -d "$DIR" 2>/dev/null ;;
+        *)      die "unknown archive format: $FILE" ;;
+    esac
+}
+
+require_vcs() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 not found (install it or use a different VCS)"
+}
+
+# ============================================================================
+# VCS clone — one per VCS type
+# ============================================================================
+
+clone_git() {
+    local URL
+    local DIR
+    local FRAG
+    local KEY
+    local VAL
+
+    URL=$1
+    DIR=$2
+    FRAG=$3
+    require_vcs git
+    rm -rf "$DIR"
+    if no "$FRAG" || ! is_pinned "$FRAG"; then
+        run git clone --depth 1 "$URL" "$DIR" 2>/dev/null || die "git clone failed"
+        return
+    fi
+    KEY=${FRAG%%=*}
+    VAL=${FRAG#*=}
+    case $KEY in
+        tag|branch)
+            run git clone --depth 1 --branch "$VAL" "$URL" "$DIR" 2>/dev/null \
+                || die "git clone failed" ;;
+        commit)
+            run git init "$DIR" 2>/dev/null
+            run git -C "$DIR" remote add origin "$URL" 2>/dev/null
+            run git -C "$DIR" fetch --depth 1 origin "$VAL" 2>/dev/null \
+                || die "git fetch failed"
+            run git -C "$DIR" checkout FETCH_HEAD 2>/dev/null \
+                || die "git checkout failed" ;;
+        *)  die "git: unknown pin key: $KEY" ;;
+    esac
+}
+
+clone_bzr() {
+    local URL
+    local DIR
+    local FRAG
+    local VAL
+
+    URL=$1
+    DIR=$2
+    FRAG=$3
+    require_vcs bzr
+    rm -rf "$DIR"
+    if no "$FRAG" || ! is_pinned "$FRAG"; then
+        run bzr branch "$URL" "$DIR" 2>/dev/null || die "bzr branch failed"
+        return
+    fi
+    VAL=${FRAG#*=}
+    run bzr branch -r "$VAL" "$URL" "$DIR" 2>/dev/null || die "bzr branch failed"
+}
+
+clone_hg() {
+    local URL
+    local DIR
+    local FRAG
+    local KEY
+    local VAL
+
+    URL=$1
+    DIR=$2
+    FRAG=$3
+    require_vcs hg
+    rm -rf "$DIR"
+    if no "$FRAG" || ! is_pinned "$FRAG"; then
+        run hg clone "$URL" "$DIR" 2>/dev/null || die "hg clone failed"
+        return
+    fi
+    KEY=${FRAG%%=*}
+    VAL=${FRAG#*=}
+    case $KEY in
+        branch|tag)
+            run hg clone -u "$VAL" "$URL" "$DIR" 2>/dev/null || die "hg clone failed" ;;
+        revision)
+            run hg clone -r "$VAL" "$URL" "$DIR" 2>/dev/null || die "hg clone failed" ;;
+        *)  die "hg: unknown pin key: $KEY" ;;
+    esac
+}
+
+clone_fossil() {
+    local URL
+    local DIR
+    local FRAG
+    local KEY
+    local VAL
+    local REPO
+
+    URL=$1
+    DIR=$2
+    FRAG=$3
+    require_vcs fossil
+    rm -rf "$DIR"
+    REPO="${DIR}.fossil"
+    run fossil clone "$URL" "$REPO" 2>/dev/null || die "fossil clone failed"
+    mkdir -p "$DIR"
+    run fossil open -C "$DIR" "$REPO" 2>/dev/null || :
+    rm -f "$REPO"
+    if no "$FRAG" || ! is_pinned "$FRAG"; then return; fi
+    KEY=${FRAG%%=*}
+    VAL=${FRAG#*=}
+    case $KEY in
+        branch|tag|commit)
+            run fossil -C "$DIR" checkout "$VAL" 2>/dev/null || die "fossil checkout failed" ;;
+        *)  die "fossil: unknown pin key: $KEY" ;;
+    esac
+}
+
+clone_svn() {
+    local URL
+    local DIR
+    local FRAG
+    local VAL
+
+    URL=$1
+    DIR=$2
+    FRAG=$3
+    require_vcs svn
+    rm -rf "$DIR"
+    if no "$FRAG" || ! is_pinned "$FRAG"; then
+        run svn checkout "$URL" "$DIR" 2>/dev/null || die "svn checkout failed"
+        return
+    fi
+    VAL=${FRAG#*=}
+    run svn checkout -r "$VAL" "$URL" "$DIR" 2>/dev/null || die "svn checkout failed"
+}
+
+# ============================================================================
+# VCS dispatch
+# ============================================================================
+
+vcs_clone() {
+    local VCS
+    local URL
+    local DIR
+    local FRAG
+
+    VCS=$1
+    URL=$2
+    DIR=$3
+    FRAG=$4
+    case $VCS in
+        git)    clone_git    "$URL" "$DIR" "$FRAG" ;;
+        bzr)    clone_bzr    "$URL" "$DIR" "$FRAG" ;;
+        hg)     clone_hg     "$URL" "$DIR" "$FRAG" ;;
+        fossil) clone_fossil "$URL" "$DIR" "$FRAG" ;;
+        svn)    clone_svn    "$URL" "$DIR" "$FRAG" ;;
+        *)      die "unsupported VCS: $VCS" ;;
+    esac
+}
+
+# ============================================================================
+# Fetch dispatch
+# ============================================================================
+
+vcs_fetch() {
+    local RAW_URL
+    local VCS
+    local DIR
+    local BARE_URL
+    local FRAG
+
+    RAW_URL=$1
+    VCS=$2
+    DIR=$3
+    BARE_URL=${RAW_URL#*+}
+    case $BARE_URL in
+        *#*) FRAG="${BARE_URL#*#}"; BARE_URL="${BARE_URL%%#*}" ;;
+        *)   FRAG="" ;;
+    esac
+    vcs_clone "$VCS" "$BARE_URL" "$DIR" "$FRAG"
+}
+
+url_fetch() {
+    local RAW_URL
+    local DIR
+    local FILE
+    local FPATH
+
+    RAW_URL=$1
+    DIR=$2
+    FILE=$(url_file "$RAW_URL")
+    FPATH=$(curl_to "$RAW_URL" "$DIR")
+    is_archive_file "$FILE" || { echo "$FPATH"; return; }
+    extract_archive "$FPATH" "$DIR"
+    rm -f "$FPATH"
+    echo "$DIR"
+}
+
+# ============================================================================
+# Resolve target directory for a URL
+# ============================================================================
+
+resolve_target_dir() {
+    local RAW_URL
+    local OUTDIR
+    local DIR_NAME
+    local CLEAN_URL
+
+    RAW_URL=$1
+    OUTDIR=$2
+    DIR_NAME=$3
+
+    if no "$DIR_NAME"; then
+        if is_vcs_url "$RAW_URL"; then
+            CLEAN_URL=${RAW_URL%%#*}
+            CLEAN_URL=${CLEAN_URL#*+}
+            echo "${OUTDIR}/$(repo_name "$CLEAN_URL")"
+        else
+            echo "$OUTDIR"
+        fi
+    else
+        echo "${OUTDIR}/${DIR_NAME}"
+    fi
+}
+
+# ============================================================================
+# Fetch one URL
+# ============================================================================
+
+fetch_one() {
+    local RAW_URL
+    local OUTDIR
+    local DIR_NAME
+    local VCS
+    local DIR
+
+    RAW_URL=$1
+    OUTDIR=$2
+    RAW_URL=$(raw_url "$RAW_URL")
+
+    case $RAW_URL in
+        *::*) DIR_NAME="${RAW_URL%%::*}"; RAW_URL="${RAW_URL#*::}" ;;
+        *)    DIR_NAME="" ;;
+    esac
+
+    VCS=$(vcs_type "$RAW_URL")
+    DIR=$(resolve_target_dir "$RAW_URL" "$OUTDIR" "$DIR_NAME")
+
+    if is_dryrun; then
+        if is_vcs_url "$RAW_URL"; then
+            echo "$DIR"
+        elif is_archive_file "$(url_file "$RAW_URL")"; then
+            echo "$DIR"
+        else
+            echo "${DIR}/$(url_file "$RAW_URL")"
+        fi
+        return 0
+    fi
+
+    if is_vcs_url "$RAW_URL"; then
+        vcs_fetch "$RAW_URL" "$VCS" "$DIR"
+        echo "$DIR"
+    elif is_url "$RAW_URL"; then
+        url_fetch "$RAW_URL" "$DIR"
+    else
+        die "not a valid URL: $RAW_URL"
+    fi
+}
+
+# ============================================================================
+# Usage
+# ============================================================================
+
+show_usage() {
+    while IFS= read -r LINE; do
+        case $LINE in
+            '#!'*) ;;
+            '#'*)  LINE=${LINE#\#}; LINE=${LINE# }; echo "$LINE" ;;
+            *)     break ;;
+        esac
+    done < "$0"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    local OUTDIR
+
+    OUTDIR="."
+
+    case ${1:-} in
+        -h|--help|help|"")
+            show_usage
+            return 0
+            ;;
+    esac
+
+    while [[ $1 == -* ]]; do
+        case $1 in
+            -o) OUTDIR=$2; shift 2 ;;
+            -v) VERBOSE=1; shift ;;
+            -n) DRYRUN=1; shift ;;
+            *)  die "usage: $SCRIPT [-v] [-n] [-o DIR] URL [URL...]" ;;
+        esac
+    done
+
+    urls_given "$@" || die "usage: $SCRIPT [-v] [-n] [-o DIR] URL [URL...]"
+
+    for URL in "$@"; do fetch_one "$URL" "$OUTDIR"; done
+}
+
+main "$@"
