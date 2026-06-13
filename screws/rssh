@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# rssh — sync directory to remote and run commands
+#
+# WHAT IT DOES
+#
+# Syncs a local directory to a remote host via rsync, then optionally runs
+# a command there.
+#
+# Default: sync to /tmp/<name>.<random>, run command, auto-remove remote dir.
+# --to*:    sync to a fixed path that persists between invocations.
+#
+# The tool never deletes user data. It only removes the temp dirs it created
+# (default mode). --to* dirs are never touched after the initial sync.
+#
+# USAGE
+#
+#     rssh [OPTIONS] [SOURCE] HOST [CMD...]
+#
+# OPTIONS
+#
+#     What to sync (default: all files, exclude .git/):
+#       --all              include .git/
+#       --tracked          git-tracked files only (requires git repo)
+#       SOURCE             explicit source directory
+#
+#     Where to put it (default: /tmp/<name>.<random>):
+#       --to-suffix NAME   /tmp/<name>.<NAME>
+#       --to-prefix DIR    DIR/<name>
+#       --to PATH          PATH exactly
+#
+#     All --to* modes keep the remote dir after the command (reusable).
+#
+#     How to run:
+#       --dry-run, -n      preview
+#       --quiet, -q        less output
+#
+# EXAMPLES
+#
+#     rssh server ./test.sh                           # sync, run, auto-clean
+#     rssh --to-suffix dev server ./test.sh           # sync → /tmp/repo.dev
+#     rssh --to ~/app server                          # sync → ~/app
+#     rssh --to-prefix ~/deploy server                # sync → ~/deploy/repo
+#     rssh ~/docs server                              # sync explicit dir
+#     rssh --all server                               # include .git/
+#     rssh --tracked server                           # git-tracked only
+#
+# EXIT CODES
+#
+#     Exits with the remote command's exit code, or 0 when no command is given.
+
+set -euo pipefail
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+readonly RSYNC_PARTIAL=23  # partial transfer due to vanished files
+
+# ============================================================================
+# Utilities
+# ============================================================================
+
+die() { echo "rssh: $*" >&2; exit 1; }
+got() { [[ -n "$1" ]]; }
+no()  { [[ -z "$1" ]]; }
+
+has_arguments() { [[ ${1:-0} -gt 0 ]]; }
+
+is_dryrun()          { [[ -n "$DRYRUN" ]]; }
+is_quiet()           { [[ -n "$QUIET" ]]; }
+is_tracked()         { [[ -n "$TRACKED" ]]; }
+is_including_git()   { [[ -n "$INCLUDEGIT" ]]; }
+
+log_info() { is_quiet || echo "[INFO] $*" >&2; }
+in_git_repo()        { [[ -n "$GIT_ROOT" ]]; }
+has_to_suffix()      { got "$TO_SUFFIX"; }
+has_to_prefix()      { got "$TO_PREFIX"; }
+has_to()             { got "$TO"; }
+is_default_target() { no "$TO" && no "$TO_PREFIX" && no "$TO_SUFFIX"; }
+
+# ============================================================================
+# Source resolution
+# ============================================================================
+
+find_git_root() {
+    git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+src_path() {
+    if got "$SRCDIR"; then
+        echo "$SRCDIR"
+    elif in_git_repo; then
+        echo "$GIT_ROOT"
+    else
+        pwd
+    fi
+}
+
+src_basename() {
+    basename "$(src_path)"
+}
+
+require_git() {
+    in_git_repo || die "--tracked requires a git repository"
+}
+
+# ============================================================================
+# Destination resolution
+# ============================================================================
+
+resolve_dest() {
+    local TS
+
+    if has_to; then
+        echo "$TO"
+    elif has_to_prefix; then
+        echo "${TO_PREFIX}/$(src_basename)"
+    elif has_to_suffix; then
+        echo "/tmp/$(src_basename).${TO_SUFFIX}"
+    else
+        TS=$(date +%s)
+        echo "/tmp/$(src_basename).${TS}"
+    fi
+}
+
+# ============================================================================
+# Sync
+# ============================================================================
+
+git_tracked_files() (
+    cd "$GIT_ROOT"
+    git ls-files
+)
+
+sync_tracked() {
+    local HOST=$1
+    local DEST=$2
+
+    git_tracked_files | run_rsync --files-from=- "$GIT_ROOT/" "$HOST:$DEST/"
+}
+
+sync_all() {
+    local HOST=$1
+    local DEST=$2
+    local SRC
+    shift 2
+
+    SRC=$(src_path)
+    run_rsync "$@" "$SRC/" "$HOST:$DEST/"
+}
+
+run_rsync() {
+    local RC=0
+
+    if is_quiet; then
+        rsync -az "$@" 2>/dev/null || RC=$?
+    else
+        rsync -az "$@" || RC=$?
+    fi
+    rsync_ok $RC
+}
+
+rsync_ok() {
+    local RC=$1
+
+    [[ $RC -eq 0 ]] && return 0
+    [[ $RC -eq $RSYNC_PARTIAL ]] && return 0
+    die "rsync failed (exit $RC)"
+}
+
+sync_to_remote() {
+    local HOST=$1
+    local DEST=$2
+
+    if is_tracked; then
+        sync_tracked "$HOST" "$DEST"
+    elif is_including_git; then
+        sync_all "$HOST" "$DEST"
+    else
+        sync_all "$HOST" "$DEST" --exclude=.git/
+    fi
+}
+
+# ============================================================================
+# Remote operations
+# ============================================================================
+
+remote_run() {
+    local HOST=$1
+    local DIR=$2
+    local CMD
+    shift 2
+
+    has_arguments $# || die "remote_run: no command"
+    printf -v CMD '%q ' "$@"
+    ssh "$HOST" "cd '$DIR' && $CMD"
+}
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+preview_sync_and_run() {
+    local HOST=$1
+    local DEST=$2
+    local SRC
+
+    SRC=$(src_path)
+    log_info "would sync: $SRC -> $HOST:$DEST"
+    if is_tracked; then
+        log_info "mode: tracked"
+    elif is_including_git; then
+        log_info "mode: all"
+    else
+        log_info "mode: default, exclude .git/"
+    fi
+    # inline — extracting would require reading COMMAND via dynamic scoping
+    if [[ ${#COMMAND[@]} -gt 0 ]]; then log_info "would run: ${COMMAND[*]}"; fi
+}
+
+cmd_sync_and_run() {
+    local HOST=$1
+    shift
+    local COMMAND=("$@")
+    local DEST
+    local RC=0
+
+    if is_tracked; then
+        require_git
+        if is_including_git; then echo "[WARN] --all has no effect with --tracked" >&2; fi
+        if got SRCDIR; then SRCDIR=; fi
+    fi
+
+    DEST=$(resolve_dest)
+
+    if is_dryrun; then
+        preview_sync_and_run "$HOST" "$DEST"
+        return 0
+    fi
+
+    if ! is_default_target && [[ ${#COMMAND[@]} -gt 0 ]]; then
+        # One SSH: try cd + run. exit 200 = dir missing, fall through to sync.
+        local CMD
+        printf -v CMD '%q ' "${COMMAND[@]}"
+        if ssh "$HOST" "cd '$DEST' 2>/dev/null || exit 200; $CMD"; then
+            log_info "reusing: $HOST:$DEST"
+            return 0
+        fi
+        RC=$?
+        if [[ $RC -ne 200 ]]; then
+            log_info "exit $RC"
+            return $RC
+        fi
+    fi
+
+    sync_to_remote "$HOST" "$DEST"
+    log_info "synced: $HOST:$DEST"
+
+    if [[ ${#COMMAND[@]} -gt 0 ]]; then
+        remote_run "$HOST" "$DEST" "${COMMAND[@]}" || RC=$?
+        log_info "exit $RC"
+        if is_default_target; then
+            ssh "$HOST" "rm -rf '$DEST'"
+            log_info "cleaned: $HOST:$DEST"
+        fi
+        return $RC
+    fi
+}
+
+# ============================================================================
+# Argument parsing
+# ============================================================================
+
+is_source_arg() {
+    local ARG=$1
+
+    [[ $ARG == */* ]] ||
+    [[ $ARG == .* ]] ||
+    [[ $ARG == ~* ]] ||
+    [[ -d $ARG ]]
+}
+
+usage() {
+    sed -n '2,/^[^#]/p' "$0" | sed '$d; s/^# \?//'
+}
+
+main() {
+    DRYRUN=
+    QUIET=
+    TRACKED=
+    INCLUDEGIT=
+    TO_SUFFIX=
+    TO_PREFIX=
+    TO=
+    SRCDIR=
+    GIT_ROOT=
+    local HOST
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --all)       INCLUDEGIT=1; shift ;;
+            --tracked)   TRACKED=1; shift ;;
+            --to-suffix) TO_SUFFIX=$2; shift 2 ;;
+            --to-prefix) TO_PREFIX=$2; shift 2 ;;
+            --to)        TO=$2; shift 2 ;;
+            --dry-run|-n) DRYRUN=1; shift ;;
+            --quiet|-q)  QUIET=1; shift ;;
+            --help|-h)   usage; exit 0 ;;
+            -*)          die "unknown option: $1" ;;
+            *)           break ;;
+        esac
+    done
+
+    has_arguments $# || { usage; exit 0; }
+
+    GIT_ROOT=$(find_git_root)
+
+    # Check if first positional is a source directory
+    if is_source_arg "$1"; then
+        SRCDIR=$1
+        SRCDIR=${SRCDIR/#\~/$HOME}
+        shift
+        has_arguments $# || die "missing HOST"
+    fi
+
+    HOST=$1
+    shift
+    cmd_sync_and_run "$HOST" "$@"
+}
+
+main "$@"

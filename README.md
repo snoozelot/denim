@@ -25,6 +25,7 @@ Shell tools organized into useful **screw** and **toys**.
 | `mkpin` | Name a directory, open files from anywhere with tab completion |
 | `mutexec` | Clean wrapper around &>/dev/null |
 | `pdsc` | List process descendants |
+| `rssh` | Sync directory to remote host, run commands |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
 | `tabexec` | Execute commands, format output as aligned table |
