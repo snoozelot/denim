@@ -101,7 +101,6 @@ mkpin_cat() {
     mapfile -t PATHS < <(mkpin_resolve "$DIR" "$@")
 
     cat "${PATHS[@]}"
-    printf '%s\n' "${PATHS[@]}" >&2
 }
 
 mkpin_path() {
