@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# xrm — Move files to dated trash (~/.limbo/YYYY-MM-DD/)
+#
+# Moves files to ~/.limbo/YYYY-MM-DD/, creating the directory if needed.
+# Prints each file's destination. Never overwrites existing files.
+#
+# Usage:
+#   xrm [-n] FILE...
+#   xrm [-n] -r [DIR]    # find and move junk under DIR
+#
+# Options:
+#   -n         Dry-run: show what would be moved without moving
+#   -r [DIR]   Recursive: find and move known junk patterns under DIR
+#              Timestamped backups (*.1234567890), .bak, .backup, .orig,
+#              .original, .latest, .old, .new
+#
+# Examples:
+#   xrm old.txt unused.c
+#   xrm *.bak
+#   xrm -n *.tmp
+#   xrm -r .                    # clean up stamps and junk
+#   xrm -r ~/projects/myrepo
+#
+# EXIT CODES
+#   0   All files moved
+#   1   Any file not found, would clobber, or other error
+
+set -euo pipefail
+
+readonly TRASH_DIR=~/.limbo
+
+die()       { printf '%s\n' "$@" >&2; exit 1; }
+is_dryrun() { [[ -n "${DRYRUN:-}" ]]; }
+is_recursive() { [[ -n "${RECURSIVE:-}" ]]; }
+
+# ============================================================================
+# Pattern finders
+# ============================================================================
+
+# Timestamped cpstamped backups: *.1234567890
+TIMESTAMP_REGEX='.*\.[0-9]{10}$'
+
+JUNK_NAMES=(
+    '*.bak'
+    '*.backup'
+    '*.orig'
+    '*.original'
+    '*.latest'
+    '*.old'
+    '*.new'
+)
+
+find_junk() {
+    local DIR=$1
+    local NAME_ARGS=()
+    local P
+
+    for P in "${JUNK_NAMES[@]}"; do
+        [[ ${#NAME_ARGS[@]} -gt 0 ]] && NAME_ARGS+=(-o)
+        NAME_ARGS+=(-name "$P" -type f)
+    done
+
+    find "$DIR" -regextype posix-extended -regex "$TIMESTAMP_REGEX" -type f \
+        -o \( "${NAME_ARGS[@]}" \)
+}
+
+# ============================================================================
+# Move
+# ============================================================================
+
+move_one() {
+    local SRC=$1
+    local TARGET=$2
+    local DEST
+
+    [[ -e "$SRC" ]] || die "Not found: $SRC"
+
+    DEST="$TARGET/$(basename "$SRC")"
+    [[ ! -e "$DEST" ]] || die "Would clobber: $DEST"
+
+    if is_dryrun; then
+        printf '[dry-run] %s -> %s\n' "$SRC" "$DEST"
+    else
+        mv -- "$SRC" "$DEST"
+        printf '%s\n' "$DEST"
+    fi
+}
+
+move_all() {
+    local DIR=$1
+    local TARGET=$2
+    local FINDER=$3
+    local SRC
+
+    while IFS= read -r SRC; do
+        move_one "$SRC" "$TARGET"
+    done < <("$FINDER" "$DIR")
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    local TARGET
+
+    DRYRUN=
+    RECURSIVE=
+
+    while [[ "${1:-}" == -* ]]; do
+        case "$1" in
+            -h)
+                sed -n '2,/^$/{ s/^# \?//p }' "$0"
+                return 0
+                ;;
+            -n) DRYRUN=1;    shift ;;
+            -r) RECURSIVE=1; shift ;;
+            *)  die "Unknown option: $1" ;;
+        esac
+    done
+
+    TARGET="$TRASH_DIR/$(date +%F)"
+    is_dryrun || mkdir -p "$TARGET"
+
+    if is_recursive; then
+        move_all "${1:-.}" "$TARGET" find_junk
+        return 0
+    fi
+
+    [[ $# -gt 0 ]] || die \
+        "Usage: xrm [-n] FILE..." \
+        "       xrm [-n] -r [DIR]"
+
+    for SRC in "$@"; do
+        move_one "$SRC" "$TARGET"
+    done
+}
+
+main "$@"

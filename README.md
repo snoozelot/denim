@@ -32,6 +32,7 @@ Shell tools organized into useful **screw** and **toys**.
 | `tabexec` | Execute commands, format output as aligned table |
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |
+| `xrm` | Move files to dated trash (~/.limbo/YYYY-MM-DD/) |
 | `zenexec` | Clean wrapper around 2>/dev/null |
 | `zrun` | Run commands from compressed scripts |
 
