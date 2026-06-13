@@ -931,10 +931,28 @@ cmd_extract() {
         if path_exists "$FINAL_DEST"; then
             die "Destination already exists: $FINAL_DEST"
         fi
-        printf 'Extracting to %s/\n' "$FINAL_DEST"
     fi
+    local INNER
+    local SUBDIR
+
     mkdir -p "$FINAL_DEST"
     type_dispatch "$TYPE" extract "$ARCHIVE" "$FINAL_DEST"
+
+    # Bare compressor single-file: output the file path, not just the directory
+    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    case "$TYPE" in
+        gz|bz2|xz|zst|lz4|lzma|lz|br|sz|bz3)
+            if ! inner_is_tar "$INNER"; then
+                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                printf '%s\n' "$FINAL_DEST/$SUBDIR"
+            else
+                printf '%s\n' "$FINAL_DEST"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$FINAL_DEST"
+            ;;
+    esac
 }
 
 cmd_list() {
