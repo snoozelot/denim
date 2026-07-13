@@ -71,7 +71,11 @@ set -euo pipefail
 
 readonly TIMESTAMP_GLOB='.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
 readonly LIMBO_DIR=~/.limbo
-readonly -a EXCLUDE=(.terraform sessions)
+readonly -a EXCLUDE=(
+    .terraform
+    sessions
+    node_modules
+)
 
 # ============================================================================
 # Predicates
