@@ -3,20 +3,18 @@
 #
 # WHAT IT DOES
 #
-# Wrapper for common archive formats. Detects format by extension and
-# dispatches to the right tool. Compound formats (tar.gz, tgz, …) work
-# by either direct type dispatch (tgz, tbz2, …) or by peeking one level
-# in (gz → strip extension → tar → use tar -xzf). Smart extraction puts
-# multiple top-level entries in a subdirectory named after the archive
-# with handled extensions stripped.
+# Wrapper for common archive formats. Detects format by extension,
+# dispatches to the right tool. Compound formats (tar.gz, tgz)
+# work by direct dispatch (tgz) or by peeking inner type (gz → tar →
+# tar -xzf). Selective extraction, smart tarbomb subdir wrapping.
 #
 # WHY
 #
-# Each type owns all its operations in one place. Adding a format means
-# adding one type function and one dispatch line — nothing else changes.
-# Type enumeration happens once in type_dispatch; cmd_* handle only
-# command-level concerns (argument validation, tarbomb detection, dest
-# resolution) and delegate tool invocation to the type.
+# Each type owns all its operations in one place. Adding a format
+# means one type function and one dispatch line — nothing else
+# changes. Type enumeration happens once in type_dispatch.
+# cmd_* handle only argument validation and orchestration;
+# type_X handle tool invocation.
 #
 # HOW IT WORKS
 #
@@ -24,25 +22,45 @@
 # 2. type_dispatch — maps type token to its handler function
 # 3. type_X — owns extract/list/paths/create/test for type X
 #    - aliases (tgz, tbz2, …): direct tar invocation
-#    - bare compressors (gz, bz2, …): peek one level in; if inner is
-#      tar, delegate to tar; otherwise single-file compress/decompress
+#    - bare compressors (gz, bz2, …): peek one level in; if inner
+#      is tar, delegate to tar; else single-file compress/decompress
 #    - containers (zip, 7z, …): direct tool invocation
-# 4. cmd_* — validate args, detect type, resolve dest, call type_dispatch
+# 4. cmd_* — validate args, detect type, resolve dest,
+#    call type_dispatch
 #
 # USAGE
 #
-#   arc x ARCHIVE [DIR]     Extract archive (to DIR if specified)
-#   arc l ARCHIVE           List contents
-#   arc c ARCHIVE FILES...  Create archive (format from extension)
-#   arc t ARCHIVE           Test archive integrity
+#   arc x ARCHIVE [SELECTION...] [--out DIR]
+#   arc l ARCHIVE
+#   arc c ARCHIVE FILES...
+#   arc t ARCHIVE
+#
+# OPTIONS
+#
+#   --out DIR    Extract to DIR (default: .)
+#   SELECTION    Path inside archive to extract; repeatable.
+#                Omit to extract entire archive.
 #
 # EXAMPLES
 #
-#   arc x backup.tar.gz              Extract to current dir
-#   arc x backup.tar.gz /tmp         Extract to /tmp
-#   arc l archive.zip                List contents
-#   arc c project.tar.xz src/ doc/   Create archive
-#   arc t release.tbz2               Test integrity
+#   arc x foo.tar.xz                 Extract (auto-subdir if tarbomb)
+#   arc x foo.tar.xz dir1/           Extract selected paths
+#   arc x foo.tar.xz dir1/ f2 --out /tmp
+#   arc l archive.zip
+#   arc c project.tar.xz src/ doc/
+#   arc t release.tbz2
+#
+# EXIT CODES
+#
+#   0 — success
+#   1 — error (file not found, unknown type, IO failure)
+#
+# DEPENDENCIES
+#
+#   POSIX: tar, gzip, bzip2, xz, unzip, zip, ar, cpio
+#   Optional: 7z, zstd, lz4, lzip, lzma, brotli, snzip, bzip3,
+#   unrar, rar, lhasa, cabextract, unshield, dpkg-deb, rpm2cpio,
+#   rpm, innoextract, unace
 #
 # SUPPORTED FORMATS
 #
@@ -56,9 +74,9 @@
 #
 # LIMITATIONS
 #
-#   arc c does not create: cab ace deb rpm exe (extract only)
-#   Bare compressors (gz bz2 xz ...) require a compound extension
-#     (.tar.gz, .tar.xz, ...) for archives with multiple files.
+#   arc c cannot create: cab ace deb rpm exe
+#   Bare compressors require compound extension (.tar.gz)
+#     for archives with multiple files.
 
 set -euo pipefail
 
@@ -74,17 +92,57 @@ has_arguments()    { [[ $# -gt 0 ]]; }
 single_file_only() { [[ $# -eq 1 ]]; }
 has_files()        { [[ $# -ge 2 ]]; }  # archive + at least one source
 inner_is_tar()     { [[ $1 == tar ]]; }
+got()              { [[ -n $1 ]]; }
+no()               { [[ -z $1 ]]; }
+
+# Bare compressor inner type: strip one extension, detect the rest.
+# Inner $() catches die's exit 1; || fallback to empty on unknown type.
+peek_inner_type() {
+    local TYPE
+    TYPE=$(detect_type "${1%.*}" 2>/dev/null) || TYPE=""
+    echo "$TYPE"
+}
+
+# Selections given? Only container types support selective extract.
+has_selections()   { [[ $# -gt 3 ]]; }
+
+# Zip dir selections need /* wildcard suffix.
+is_dir_selection() { [[ $1 == */ && $1 != *\\* ]]; }
+
+# Resolve path to absolute. Uses realpath if available, otherwise
+# prepends PWD and collapses dot segments.
+abspath() {
+    local P=$1
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m "$P"
+    else
+        [[ $P == /* ]] || P=$PWD/$P
+        # Collapse .. and . segments
+        local -a SEGS=()
+        local S
+        local OIFS=$IFS
+        local IFS=/
+        for S in $P; do
+            case $S in
+                .|'') ;;
+                ..) [[ ${#SEGS[@]} -gt 0 ]] && unset 'SEGS[-1]' ;;
+                *) SEGS+=("$S") ;;
+            esac
+        done
+        IFS=/; echo "/${SEGS[*]}"; IFS=$OIFS
+    fi
+}
 
 # Strips extensions for subdirectory naming. Strips one extension;
 # strips a second if inner type is tar (e.g. file.tar.gz -> file).
 subdir_name() {
     local ARCHIVE=$1
     local INNER=${2:-}
-    local F="${ARCHIVE##*/}"
+    local F=${ARCHIVE##*/}
 
-    F="${F%.*}"
+    F=${F%.*}
     if inner_is_tar "$INNER"; then
-        F="${F%.*}"
+        F=${F%.*}
     fi
     echo "$F"
 }
@@ -157,7 +215,7 @@ type_tgz() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar -xzf    "$ARCHIVE" -C "$3" ;;
+        extract) tar -xzf    "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar -tzf    "$ARCHIVE" ;;
         paths)   tar -tzf    "$ARCHIVE" ;;
         create)  tar -czf    "$ARCHIVE" "${@:3}" ;;
@@ -169,7 +227,7 @@ type_tbz2() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar -xjf    "$ARCHIVE" -C "$3" ;;
+        extract) tar -xjf    "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar -tjf    "$ARCHIVE" ;;
         paths)   tar -tjf    "$ARCHIVE" ;;
         create)  tar -cjf    "$ARCHIVE" "${@:3}" ;;
@@ -181,7 +239,7 @@ type_txz() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar -xJf    "$ARCHIVE" -C "$3" ;;
+        extract) tar -xJf    "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar -tJf    "$ARCHIVE" ;;
         paths)   tar -tJf    "$ARCHIVE" ;;
         create)  tar -cJf    "$ARCHIVE" "${@:3}" ;;
@@ -193,7 +251,7 @@ type_tzst() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar --zstd -xf "$ARCHIVE" -C "$3" ;;
+        extract) tar --zstd -xf "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar --zstd -tf "$ARCHIVE" ;;
         paths)   tar --zstd -tf "$ARCHIVE" ;;
         create)  tar --zstd -cf "$ARCHIVE" "${@:3}" ;;
@@ -205,7 +263,7 @@ type_tlz() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar --lzip -xf "$ARCHIVE" -C "$3" ;;
+        extract) tar --lzip -xf "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar --lzip -tf "$ARCHIVE" ;;
         paths)   tar --lzip -tf "$ARCHIVE" ;;
         create)  tar --lzip -cf "$ARCHIVE" "${@:3}" ;;
@@ -218,7 +276,7 @@ type_tbr() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) brotli -dc "$ARCHIVE" | tar -xf - -C "$3" ;;
+        extract) brotli -dc "$ARCHIVE" | tar -xf - -C "$3" "${@:4}" ;;
         list)    brotli -dc "$ARCHIVE" | tar -tf - ;;
         paths)   brotli -dc "$ARCHIVE" | tar -tf - ;;
         create)  tar -cf - "${@:3}" | brotli > "$ARCHIVE" ;;
@@ -236,11 +294,11 @@ type_gz() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar -xzf "$ARCHIVE" -C "$3"
+                tar -xzf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 gzip -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -281,11 +339,11 @@ type_bz2() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar -xjf "$ARCHIVE" -C "$3"
+                tar -xjf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 bzip2 -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -326,11 +384,11 @@ type_xz() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar -xJf "$ARCHIVE" -C "$3"
+                tar -xJf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 xz -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -371,11 +429,11 @@ type_zst() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar --zstd -xf "$ARCHIVE" -C "$3"
+                tar --zstd -xf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 zstd -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -416,11 +474,11 @@ type_lzma() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar --lzma -xf "$ARCHIVE" -C "$3"
+                tar --lzma -xf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 lzma -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -461,11 +519,11 @@ type_lz() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                tar --lzip -xf "$ARCHIVE" -C "$3"
+                tar --lzip -xf "$ARCHIVE" -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 lzip -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -506,11 +564,11 @@ type_lz4() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                lz4 -dc "$ARCHIVE" | tar -xf - -C "$3"
+                lz4 -dc "$ARCHIVE" | tar -xf - -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 lz4 -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -551,11 +609,11 @@ type_br() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                brotli -dc "$ARCHIVE" | tar -xf - -C "$3"
+                brotli -dc "$ARCHIVE" | tar -xf - -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 brotli -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -596,11 +654,11 @@ type_sz() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                snunzip -c "$ARCHIVE" | tar -xf - -C "$3"
+                snunzip -c "$ARCHIVE" | tar -xf - -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 snunzip -c "$ARCHIVE" > "$3/$SUBDIR"
@@ -641,11 +699,11 @@ type_bz3() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     case "$OP" in
         extract)
             if inner_is_tar "$INNER"; then
-                bzip3 -dc "$ARCHIVE" | tar -xf - -C "$3"
+                bzip3 -dc "$ARCHIVE" | tar -xf - -C "$3" "${@:4}"
             else
                 SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
                 bzip3 -dc "$ARCHIVE" > "$3/$SUBDIR"
@@ -685,7 +743,7 @@ type_tar() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) tar -xf  "$ARCHIVE" -C "$3" ;;
+        extract) tar -xf  "$ARCHIVE" -C "$3" "${@:4}" ;;
         list)    tar -tf  "$ARCHIVE" ;;
         paths)   tar -tf  "$ARCHIVE" ;;
         create)  tar -cf  "$ARCHIVE" "${@:3}" ;;
@@ -699,7 +757,21 @@ type_zip() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) unzip -q  "$ARCHIVE" -d "$3" ;;
+        extract)
+            if has_selections "$@"; then
+                local -a ARGS=()
+                local SEL
+                for SEL in "${@:4}"; do
+                    if is_dir_selection "$SEL"; then
+                        ARGS+=("${SEL}*")
+                    else
+                        ARGS+=("$SEL")
+                    fi
+                done
+                unzip -q "$ARCHIVE" "${ARGS[@]}" -d "$3"
+            else
+                unzip -q "$ARCHIVE" -d "$3"
+            fi ;;
         list)    unzip -l  "$ARCHIVE" ;;
         paths)   unzip -Z1 "$ARCHIVE" ;;
         create)  zip -r    "$ARCHIVE" "${@:3}" ;;
@@ -712,7 +784,7 @@ type_7z() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) 7z x -o"$3" "$ARCHIVE" ;;
+        extract) 7z x -o"$3" "$ARCHIVE" "${@:4}" ;;
         list)    7z l        "$ARCHIVE" ;;
         paths)   7z l -slt   "$ARCHIVE" | sed -n 's/^Path = //p' | tail -n +2 ;;
         create)  7z a        "$ARCHIVE" "${@:3}" ;;
@@ -726,7 +798,12 @@ type_rar() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) unrar x "$ARCHIVE" "$3/" ;;
+        extract)
+            if has_selections "$@"; then
+                unrar x "$ARCHIVE" "${@:4}" "-op$3/"
+            else
+                unrar x "$ARCHIVE" "$3/"
+            fi ;;
         list)    unrar l "$ARCHIVE" ;;
         paths)   unrar lb "$ARCHIVE" ;;
         create)  rar a   "$ARCHIVE" "${@:3}" ;;
@@ -739,7 +816,7 @@ type_lzh() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) lha xw="$3" "$ARCHIVE" ;;
+        extract) lha xw="$3" "$ARCHIVE" "${@:4}" ;;
         list)    lha l       "$ARCHIVE" ;;
         paths)   lha l       "$ARCHIVE" | awk 'NR>2 {print $NF}' ;;
         create)  lha c       "$ARCHIVE" "${@:3}" ;;
@@ -753,7 +830,14 @@ type_cab() {
     local ARCHIVE=$2
     case "$OP" in
         extract)
-            if unshield t "$ARCHIVE" &>/dev/null; then
+            if has_selections "$@"; then
+                local -a ARGS=()
+                local SEL
+                for SEL in "${@:4}"; do
+                    ARGS+=(-F "$SEL")
+                done
+                cabextract -d "$3" "${ARGS[@]}" "$ARCHIVE"
+            elif unshield t "$ARCHIVE" &>/dev/null; then
                 unshield -d "$3" x "$ARCHIVE"
             else
                 cabextract -d "$3" "$ARCHIVE"
@@ -770,7 +854,7 @@ type_ace() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) unace x -p "$3/" "$ARCHIVE" ;;
+        extract) unace x -p "$3/" "$ARCHIVE" "${@:4}" ;;
         list)    unace l    "$ARCHIVE" ;;
         paths)   unace l    "$ARCHIVE" | awk 'NR>7 {print $NF}' ;;
         create)  die "Cannot create ace archives" ;;
@@ -783,7 +867,12 @@ type_deb() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) dpkg-deb -x    "$ARCHIVE" "$3" ;;
+        extract)
+            if has_selections "$@"; then
+                dpkg-deb --fsys-tarfile "$ARCHIVE" | tar -xf - -C "$3" "${@:4}"
+            else
+                dpkg-deb -x "$ARCHIVE" "$3"
+            fi ;;
         list)    dpkg-deb -c    "$ARCHIVE" ;;
         paths)   dpkg-deb -c    "$ARCHIVE" | awk '{print $NF}' ;;
         create)  die "Cannot create deb archives" ;;
@@ -797,7 +886,7 @@ type_rpm() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) rpm2cpio "$ARCHIVE" | cpio -idm -D "$3" ;;
+        extract) rpm2cpio "$ARCHIVE" | cpio -idm -D "$3" "${@:4}" ;;
         list)    rpm -qlp  "$ARCHIVE" ;;
         paths)   rpm -qlp  "$ARCHIVE" ;;
         create)  die "Cannot create rpm archives" ;;
@@ -810,7 +899,7 @@ type_cpio() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) cpio -idm -D "$3" < "$ARCHIVE" ;;
+        extract) cpio -idm -D "$3" "${@:4}" < "$ARCHIVE" ;;
         list)    cpio -t       < "$ARCHIVE" ;;
         paths)   cpio -t       < "$ARCHIVE" ;;
         create)  find "${@:3}" | cpio -o > "$ARCHIVE" ;;
@@ -823,7 +912,7 @@ type_ar() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) ar x --output="$3" "$ARCHIVE" ;;
+        extract) ar x --output="$3" "$ARCHIVE" "${@:4}" ;;
         list)    ar t "$ARCHIVE" ;;
         paths)   ar t "$ARCHIVE" ;;
         create)  rm -f "$ARCHIVE" && ar r "$ARCHIVE" "${@:3}" ;;
@@ -836,7 +925,17 @@ type_exe() {
     local OP=$1
     local ARCHIVE=$2
     case "$OP" in
-        extract) innoextract -d "$3" "$ARCHIVE" ;;
+        extract)
+            if has_selections "$@"; then
+                local -a ARGS=()
+                local SEL
+                for SEL in "${@:4}"; do
+                    ARGS+=(-I "$SEL")
+                done
+                innoextract -d "$3" "${ARGS[@]}" "$ARCHIVE"
+            else
+                innoextract -d "$3" "$ARCHIVE"
+            fi ;;
         list)    innoextract -l "$ARCHIVE" ;;
         paths)   innoextract -l "$ARCHIVE" | sed -n 's/^ - //p' ;;
         create)  die "Cannot create exe archives" ;;
@@ -905,7 +1004,7 @@ resolve_dest() {
     local INNER
     local SUBDIR
 
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
+    INNER=$(peek_inner_type "$ARCHIVE")
     SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
     if is_tarbomb "$ARCHIVE" "$TYPE"; then
         echo "$DEST/$SUBDIR"
@@ -920,39 +1019,69 @@ resolve_dest() {
 
 cmd_extract() {
     local ARCHIVE=$1
-    local DEST=${2:-.}
+    shift
+    local DEST=.
+    local SELECTIONS=()
     local TYPE
     local FINAL_DEST
-
-    file_exists "$ARCHIVE" || die "File not found: $ARCHIVE"
-    TYPE=$(detect_type "$ARCHIVE")
-    FINAL_DEST=$(resolve_dest "$ARCHIVE" "$TYPE" "$DEST")
-    if [[ $FINAL_DEST != "$DEST" ]]; then
-        if path_exists "$FINAL_DEST"; then
-            die "Destination already exists: $FINAL_DEST"
-        fi
-    fi
     local INNER
     local SUBDIR
 
-    mkdir -p "$FINAL_DEST"
-    type_dispatch "$TYPE" extract "$ARCHIVE" "$FINAL_DEST"
+    # Parse flags and selections
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --out) DEST=$2; shift 2 ;;
+            --) shift; SELECTIONS+=("$@"); break ;;
+            -*) die "Unknown option: $1" ;;
+            *) SELECTIONS+=("$1"); shift ;;
+        esac
+    done
 
-    # Bare compressor single-file: output the file path, not just the directory
-    INNER=$(detect_type "${ARCHIVE%.*}" 2>/dev/null) || INNER=""
-    case "$TYPE" in
-        gz|bz2|xz|zst|lz4|lzma|lz|br|sz|bz3)
-            if ! inner_is_tar "$INNER"; then
-                SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
-                printf '%s\n' "$FINAL_DEST/$SUBDIR"
-            else
-                printf '%s\n' "$FINAL_DEST"
+    file_exists "$ARCHIVE" || die "File not found: $ARCHIVE"
+    TYPE=$(detect_type "$ARCHIVE")
+    DEST=$(abspath "$DEST")
+
+    if [[ ${#SELECTIONS[@]} -gt 0 ]]; then
+        # Selective extract — no tarbomb wrapping, output each selection
+        INNER=$(peek_inner_type "$ARCHIVE")
+        case "$TYPE" in
+            gz|bz2|xz|zst|lz4|lzma|lz|br|sz|bz3)
+                inner_is_tar "$INNER" || die "Selections not supported for single-file $TYPE archives"
+                ;;
+        esac
+        mkdir -p "$DEST"
+        type_dispatch "$TYPE" extract "$ARCHIVE" "$DEST" "${SELECTIONS[@]}"
+        local SEL
+        for SEL in "${SELECTIONS[@]}"; do
+            printf '%s\n' "$DEST/$SEL"
+        done
+    else
+        # Full extract with tarbomb wrapping (existing behavior)
+        FINAL_DEST=$(resolve_dest "$ARCHIVE" "$TYPE" "$DEST")
+        if [[ $FINAL_DEST != "$DEST" ]]; then
+            if path_exists "$FINAL_DEST"; then
+                die "Destination already exists: $FINAL_DEST"
             fi
-            ;;
-        *)
-            printf '%s\n' "$FINAL_DEST"
-            ;;
-    esac
+        fi
+        mkdir -p "$FINAL_DEST"
+        type_dispatch "$TYPE" extract "$ARCHIVE" "$FINAL_DEST"
+
+        # Bare compressor single-file: output the file path, not just the directory
+        INNER=$(peek_inner_type "$ARCHIVE")
+        case "$TYPE" in
+            gz|bz2|xz|zst|lz4|lzma|lz|br|sz|bz3)
+                if ! inner_is_tar "$INNER"; then
+                    SUBDIR=$(subdir_name "$ARCHIVE" "$INNER")
+                    printf '%s\n' "$FINAL_DEST/$SUBDIR"
+                else
+                    printf '%s\n' "$FINAL_DEST"
+                fi
+                ;;
+            *)
+                printf '%s\n' "$FINAL_DEST"
+                ;;
+        esac
+    fi
 }
 
 cmd_list() {
@@ -993,10 +1122,14 @@ usage() {
 Usage: arc COMMAND ARCHIVE [ARGS...]
 
 Commands:
-  x, extract   Extract archive (optional: destination dir)
+  x, extract   Extract archive [SELECTION...] [--out DIR]
   l, list      List archive contents
   c, create    Create archive from files
   t, test      Test archive integrity
+
+Options for extract:
+  --out DIR    Extract to DIR (default: .)
+  SELECTION    Path(s) inside archive to extract (extract all if omitted)
 
 Formats:
   Aliases:     tgz tbz2 tbz txz tzst tlz tbr
@@ -1010,11 +1143,13 @@ Limitations:
     for archives with multiple files
 
 Examples:
-  arc x foo.tar.xz           Extract (auto-creates subdir if needed)
-  arc x foo.tgz ./out        Extract to ./out
-  arc l foo.zip              List contents
-  arc c bar.tzst dir/        Create tzst archive
-  arc t foo.7z               Test integrity
+  arc x foo.tar.xz                    Extract (auto-creates subdir if needed)
+  arc x foo.tar.xz dir1/              Extract only dir1 from archive
+  arc x foo.tar.xz dir1/ dir2/f       Extract multiple paths
+  arc x foo.tar.xz dir1/ --out /tmp   Extract to /tmp
+  arc l foo.zip                       List contents
+  arc c bar.tzst dir/                 Create tzst archive
+  arc t foo.7z                        Test integrity
 EOF
     exit 1
 }

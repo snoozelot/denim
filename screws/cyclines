@@ -3,28 +3,31 @@
 #
 # WHAT IT DOES
 #
-# Rearranges input lines using cycle notation where [N M ...] means:
-# line at position N moves to position M, M to the next, and the last
-# position maps back to N.
+# Rearranges input lines using cycle notation. Numbers refer to
+# line positions (1-indexed). A sequence N M ... P means line N
+# moves to position M, line M to the next, and line P wraps back
+# to N.
+#
+# Cycles are separated by `--` or introduced with `--cycle`.
+# The first cycle is implicit — bare numbers start a cycle.
 #
 # USAGE
 #
-#   cyclines [ N M ... ] < input
+#   cyclines [--cycle] N M ... [-- N M ...] < input
 #
 # EXAMPLES
 #
-#   cyclines [ 1 2 ] [ 3 4 ]  # swap lines 1↔2, 3↔4
-#   cyclines [ 1 2 3 ]        # rotate: 1→2, 2→3, 3→1
+#   cyclines 1 2 -- 3 4 5   # swap 1↔2, rotate 3→4→5→3
+#   cyclines --cycle 1 2 --cycle 3 4 5  # same, explicit
+#   cyclines --cycle 1 2 3  # rotate: 1→2, 2→3, 3→1
 set -euo pipefail
 
 PERM=()
 BUF=()
 CYCLE=()
-IN_CYCLE=false
 
 die()            { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
 is_num()         { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
-is_in_cycle()    { [[ "$IN_CYCLE" == true ]]; }
 already_mapped() { [[ -n ${PERM[$1]:-} ]]; }
 has_arguments()  { [[ $# -gt 0 ]]; }
 
@@ -45,28 +48,24 @@ map_cycle() {
 }
 
 parse_arguments() {
-    local POS
     local ARG
 
-    for (( POS=1; POS<=$#; POS++ )); do
-        ARG=${!POS}
-        if [[ "$ARG" == '[' ]]; then
-            if is_in_cycle; then die "nested '[' at position $POS"; fi
-            IN_CYCLE=true
-            CYCLE=()
-        elif [[ "$ARG" == ']' ]]; then
-            is_in_cycle || die "unmatched ']' at position $POS"
-            map_cycle
-            IN_CYCLE=false
+    for ARG in "$@"; do
+        if [[ "$ARG" == '--cycle' ]] || [[ "$ARG" == '--' ]]; then
+            if [[ ${#CYCLE[@]} -gt 0 ]]; then
+                map_cycle
+                CYCLE=()
+            fi
         elif is_num "$ARG"; then
-            is_in_cycle || die "number $ARG outside cycle at position $POS"
             CYCLE+=("$ARG")
         else
-            die "expected integer, '[', or ']' at position $POS"
+            die "expected number, '--cycle', or '--', got: $ARG"
         fi
     done
 
-    if is_in_cycle; then die "unclosed '['"; fi
+    if [[ ${#CYCLE[@]} -gt 0 ]]; then
+        map_cycle
+    fi
 }
 
 validate_permutation() {
@@ -112,7 +111,7 @@ permute_lines() {
     print_buffered_lines 1 "$ID"
 }
 
-has_arguments "$@" || die "usage: cyclines [ N M ... ]"
+has_arguments "$@" || die "usage: cyclines [--cycle] N M ... [-- N M ...]"
 
 parse_arguments "$@"
 permute_lines
