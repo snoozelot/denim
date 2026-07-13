@@ -281,7 +281,23 @@ is_source_arg() {
 }
 
 usage() {
-    sed -n '2,/^[^#]/p' "$0" | sed '$d; s/^# \?//'
+    cat <<'HELP'
+Usage: rssh [OPTIONS] [SOURCE] HOST [CMD...]
+
+Sync a local directory to a remote host (rsync), run a command there, and clean up. Defaults to a temp dir; --to* modes persist the remote copy.
+When SOURCE is omitted: current directory, or git root if inside a git repo.
+Default remote path: /tmp/<basename>.<timestamp> (auto-removed after command).
+
+Options:
+  --all                include .git/ (default: exclude)
+  --tracked            sync only files tracked by git (requires a git repo)
+  --to-suffix NAME     remote path: /tmp/<basename>.<NAME> (persistent)
+  --to-prefix DIR      remote path: DIR/<basename> (persistent)
+  --to PATH            remote path: PATH exactly (persistent)
+  --dry-run, -n        show what would be done, don't run
+  --quiet, -q          suppress info messages
+  --help, -h           show this help
+HELP
 }
 
 main() {
