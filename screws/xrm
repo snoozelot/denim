@@ -5,10 +5,11 @@
 # Prints each file's destination. Never overwrites existing files.
 #
 # Usage:
-#   xrm [-n] FILE...
-#   xrm [-n] -r [DIR]    # find and move junk under DIR
+#   xrm [-fn] FILE...
+#   xrm [-fn] -r [DIR]    # find and move junk under DIR
 #
 # Options:
+#   -f         Force: append random suffix to avoid clobber
 #   -n         Dry-run: show what would be moved without moving
 #   -r [DIR]   Recursive: find and move known junk patterns under DIR
 #              Timestamped backups (*.1234567890), .bak, .backup, .orig,
@@ -18,7 +19,7 @@
 #   xrm old.txt unused.c
 #   xrm *.bak
 #   xrm -n *.tmp
-#   xrm -r .                    # clean up stamps and junk
+#   xrm -f -r .                 # force-move junk, avoid clobber with random suffix
 #   xrm -r ~/projects/myrepo
 #
 # EXIT CODES
@@ -30,11 +31,12 @@ set -euo pipefail
 readonly TRASH_DIR=~/.limbo
 
 die()       { printf '%s\n' "$@" >&2; exit 1; }
-is_dryrun() { [[ -n "${DRYRUN:-}" ]]; }
+is_dryrun()    { [[ -n "${DRYRUN:-}" ]]; }
+is_force()     { [[ -n "${FORCE:-}" ]]; }
 is_recursive() { [[ -n "${RECURSIVE:-}" ]]; }
 
 # ============================================================================
-# Pattern finders
+# Junk patterns
 # ============================================================================
 
 # Timestamped cpstamped backups: *.1234567890
@@ -71,12 +73,26 @@ find_junk() {
 move_one() {
     local SRC=$1
     local TARGET=$2
+    local BASE
     local DEST
 
     [[ -e "$SRC" ]] || die "Not found: $SRC"
 
-    DEST="$TARGET/$(basename "$SRC")"
-    [[ ! -e "$DEST" ]] || die "Would clobber: $DEST"
+    BASE=$(basename "$SRC")
+    DEST="$TARGET/$BASE"
+
+    if [[ -e "$DEST" ]]; then
+        if is_force; then
+            # Append random suffix until destination doesn't exist
+            local SUFFIX
+            while [[ -e "$DEST" ]]; do
+                SUFFIX=$RANDOM
+                DEST="$TARGET/$BASE-$SUFFIX"
+            done
+        else
+            die "Would clobber: $DEST"
+        fi
+    fi
 
     if is_dryrun; then
         printf '[dry-run] %s -> %s\n' "$SRC" "$DEST"
@@ -86,15 +102,14 @@ move_one() {
     fi
 }
 
-move_all() {
+move_recursive() {
     local DIR=$1
     local TARGET=$2
-    local FINDER=$3
     local SRC
 
     while IFS= read -r SRC; do
         move_one "$SRC" "$TARGET"
-    done < <("$FINDER" "$DIR")
+    done < <(find_junk "$DIR")
 }
 
 # ============================================================================
@@ -105,6 +120,7 @@ main() {
     local TARGET
 
     DRYRUN=
+    FORCE=
     RECURSIVE=
 
     while [[ "${1:-}" == -* ]]; do
@@ -113,6 +129,7 @@ main() {
                 sed -n '2,/^$/{ s/^# \?//p }' "$0"
                 return 0
                 ;;
+            -f) FORCE=1;     shift ;;
             -n) DRYRUN=1;    shift ;;
             -r) RECURSIVE=1; shift ;;
             *)  die "Unknown option: $1" ;;
@@ -123,13 +140,13 @@ main() {
     is_dryrun || mkdir -p "$TARGET"
 
     if is_recursive; then
-        move_all "${1:-.}" "$TARGET" find_junk
+        move_recursive "${1:-.}" "$TARGET"
         return 0
     fi
 
     [[ $# -gt 0 ]] || die \
-        "Usage: xrm [-n] FILE..." \
-        "       xrm [-n] -r [DIR]"
+        "Usage: xrm [-fn] FILE..." \
+        "       xrm [-fn] -r [DIR]"
 
     for SRC in "$@"; do
         move_one "$SRC" "$TARGET"
