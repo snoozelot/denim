@@ -1,6 +1,6 @@
 # denim — Unix shell utilities
 
-Shell tools organized into useful **screw** and **toys**.
+Shell tools organized into useful **screws**, and **toys**.
 
 ## screws/ — production tools
 
@@ -26,6 +26,7 @@ Shell tools organized into useful **screw** and **toys**.
 | `mutexec` | Clean wrapper around &>/dev/null |
 | `nugget` | PKGBUILD-style downloader (URLs, archives, VCS) |
 | `pdsc` | List process descendants |
+| `pup.js` | CSS selector HTML filter (stdin→selector→html/text/attr/json) |
 | `rssh` | Sync directory to remote host, run commands |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
@@ -33,13 +34,11 @@ Shell tools organized into useful **screw** and **toys**.
 | `vicat` | Syntax highlight any file using vim's engine |
 | `withd` | Run command in directory with colored status |
 | `xrm` | Move files to dated trash (~/.limbo/YYYY-MM-DD/) |
+| `yq.js` | XML/HTML/YAML converter through jq (xq/hq multi-name) |
 | `zenexec` | Clean wrapper around 2>/dev/null |
 | `zrun` | Run commands from compressed scripts |
 
-Shell scripts: `path-expand.sh`, `path-shorten.sh`
-(C source alongside in screws/)
-
-C source (no script): `prefix.c`
+C source: `prefix.c`, `path-expand.c`, `path-shorten.c`
 
 ## toys/
 
@@ -47,5 +46,14 @@ C source (no script): `prefix.c`
 |------|---------|
 | `memento-mori-cal` | Visualize your life in weeks (ASCII grid) |
 | `worth-the-time-xkcd-1205` | Calculate if automation saves time |
-| `spell-number` | Convert integers to words (`-l en|de|fr|ru`) |
+| `spell-number` | Convert integers to words (`-l en\|de\|fr\|ru`) |
 | `spell-topic` | Multilingual vocabulary cheat sheet |
+
+## ssam/ — structural regex stream editor
+
+| File | Purpose |
+|------|---------|
+| `ssam.c` | Sam-language text editor (dot-based, x/g/v/y commands) |
+| `ssam-regex.h` | Thompson NFA regex engine (O(nm), no backtracking) |
+
+Standalone single-file binaries via ccraft shebang.  Test suite in `ssam.t`.

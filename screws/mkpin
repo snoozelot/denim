@@ -50,7 +50,7 @@
 #
 # DEPENDENCIES
 #
-#   bash 4+, find, sed, date (GNU)
+#   bash 4+, date (GNU)
 
 declare -gA MKPIN_DIR
 
@@ -59,10 +59,12 @@ mkpin_today()  { date -Idate; }
 is_cat_flag()  { [[ $1 == --cat ]]; }
 is_help_flag() { [[ $1 == --help ]]; }
 is_path_flag() { [[ $1 == --path ]]; }
+is_mode_flag() { is_help_flag "$1" || is_cat_flag "$1" || is_path_flag "$1"; }
 is_relative()  { [[ $1 != /* ]]; }
 has_files()    { [[ $1 -gt 0 ]]; }
 got()          { [[ -n $1 ]]; }
 no()           { [[ -z $1 ]]; }
+is_hidden()    { [[ $1 == .* || $1 == */.* ]]; }
 
 mkpin_resolve() {
     local DIR=$1
@@ -75,12 +77,17 @@ mkpin_resolve() {
     done
 }
 
-mkpin_list() {
+mkpin_list() (
     local DIR=$1
 
-    find "$DIR" -mindepth 1 \( -name '.*' -prune \) -o -print \
-    | sed "s|^$DIR/||"
-}
+    cd "$DIR" 2>/dev/null || exit 1
+
+    shopt -s globstar nullglob
+    for f in **; do
+        is_hidden "$f" && continue
+        printf '%s\n' "$f"
+    done
+)
 
 mkpin_edit() {
     local DIR=$1
@@ -90,6 +97,8 @@ mkpin_edit() {
     mapfile -t PATHS < <(mkpin_resolve "$DIR" "$@")
 
     ${EDITOR:-vi} "${PATHS[@]}"
+
+    # SIDEFF: prints resolved paths after editing — caller captures output
     printf '%s\n' "${PATHS[@]}"
 }
 
@@ -135,7 +144,7 @@ mkpin_dispatch() {
     local ARG
 
     for ARG in "$@"; do
-        if is_help_flag "$ARG" || is_cat_flag "$ARG" || is_path_flag "$ARG"; then
+        if is_mode_flag "$ARG"; then
             MODE=$ARG
         else
             FILES+=("$ARG")
@@ -149,8 +158,12 @@ mkpin_dispatch() {
         mkpin_usage "$NAME"
     elif is_path_flag "$MODE"; then
         mkpin_path "$DIR" "${FILES[@]}"
-    elif ! has_files "${#FILES[@]}"; then
-        mkpin_list "$DIR"
+    elif is_cat_flag "$MODE" || ! has_files "${#FILES[@]}"; then
+        if has_files "${#FILES[@]}"; then
+            mkpin_cat "$DIR" "${FILES[@]}"
+        else
+            mkpin_list "$DIR"
+        fi
     else
         mkpin_cat "$DIR" "${FILES[@]}"
     fi
@@ -160,23 +173,33 @@ mkpin_complete() {
     local NAME=$1
     local DIR=${MKPIN_DIR[$NAME]}
     local CUR=${COMP_WORDS[COMP_CWORD]}
-    local SEARCH_DIR
-    local FILES
+    local SEARCH_DIR=$DIR
+    local PREFIX=
 
     if [[ $CUR == */* ]]; then
         SEARCH_DIR=$DIR/${CUR%/*}
-    else
-        SEARCH_DIR=$DIR
+        PREFIX=${SEARCH_DIR#$DIR/}
     fi
 
-    FILES=$(
-        find "$SEARCH_DIR" -mindepth 1 -maxdepth 1 \( -name '.*' -prune \) -o -print \
-        | sed "s|^$DIR/||" \
-        | while IFS= read -r F; do
-            if [[ -d $DIR/$F ]]; then printf '%s/\n' "$F"; else printf '%s\n' "$F"; fi
-        done
-    )
-    mapfile -t COMPREPLY < <(compgen -W "$FILES" -- "$CUR")
+    local -a ENTRIES
+    local F
+    local NULLGLOB
+
+    NULLGLOB=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob
+    for F in "$SEARCH_DIR"/*; do
+        local BASE=${F##*/}
+        is_hidden "$BASE" && continue
+        local REL="${PREFIX:+$PREFIX/}$BASE"
+        if [[ -d $F ]]; then
+            ENTRIES+=("$REL/")
+        else
+            ENTRIES+=("$REL")
+        fi
+    done
+    eval "$NULLGLOB"
+
+    mapfile -t COMPREPLY < <(compgen -W "${ENTRIES[*]}" -- "$CUR")
 }
 
 mkpin() {
