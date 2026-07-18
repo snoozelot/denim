@@ -17,6 +17,7 @@ Shell tools organized into useful **screws**, and **toys**.
 | `cronic` | Run a command, log output, show only on failure |
 | `cycle` | Return next item in a list, wrapping at end |
 | `cyclines` | Reorder lines by positional swaps |
+| `dlnactl` | Browse DLNA/UPnP media servers (discovery, browse, search) |
 | `echofile` | Create files named after their content |
 | `iwatch` | Run command on file change (inotify) |
 | `iiwatch` | Run command on file change, F5, or midnight |

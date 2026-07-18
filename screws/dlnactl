@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# dlnactl - browse UPnP-AV media servers
+#
+# Discovers DLNA MediaServer devices via SSDP multicast,
+# browses ContentDirectory trees, and searches media items.
+#
+# Three subcommands: list-servers (discovery), list-media (browse by ID),
+# search (keyword match across fields). Results pipe through player or editor.
+#
+# WHY — DLNA/UPnP lacks a simple CLI. Avoids browser or custom app for
+# the common case: find a server, list media, search, play.
+#
+# HOW IT WORKS
+# 1. SSDP M-SEARCH discovers MediaServer:1 devices on the LAN
+# 2. SOAP Browse/Search against ContentDirectory:1 service
+# 3. XML parsed with xq (jq for XML) — tree view or URI list
+# 4. Optionally pipe URIs to mpv or through $EDITOR vipe
+#
+# USAGE
+#   dlnactl [OPTIONS] <subcommand> [args]
+#
+# OPTIONS
+#   --endpoint HOST[:PORT]   server endpoint (default: auto-discover)
+#   -f, --field FIELD        search field (default: dc:title)
+#   -d, --debug              debug mode — show SOAP requests/responses
+#   -p, --play               pipe result URIs to $VIDEO_PLAYER (mpv-video)
+#   -P, --play-edit          edit URI list before playing
+#   -h, --help               show usage and options
+#
+# DEPENDENCIES
+#   xq          — XML to JSON (from python-yq or similar)
+#   curl        — HTTP/SOAP requests
+#   socat       — UDP multicast for SSDP discovery
+#   vipe        — editor pipe (from moreutils), only with -P
+#   mpv-video   — media player, only with -p/-P
+#
+# EXIT CODES
+#   0   success
+#   1   error (missing dep, no servers, bad arg)
+
+set -euo pipefail
+
+SCRIPT=${0##*/}
+
+# --- constants ---
+
+SSDP_ADDR="239.255.255.250:1900"
+SSDP_ST="urn:schemas-upnp-org:device:MediaServer:1"
+SOAP_NS="http://schemas.xmlsoap.org/soap/envelope/"
+SOAP_ENC="http://schemas.xmlsoap.org/soap/encoding/"
+USER_AGENT="gupnp-av-cp GUPnP/0.18.1 DLNADOC/1.50"
+CONTENT_DIR="urn:schemas-upnp-org:service:ContentDirectory:1"
+DEFAULT_PORT="8200"
+BROWSE_LIMIT="10000"
+SEARCH_LIMIT="100"
+ROOT_ID="0"
+
+# --- config ---
+
+DEBUG=false
+PLAY=false
+EDIT=false
+PLAYER=${VIDEO_PLAYER:-mpv-video}
+SERVER=""
+PORT=$DEFAULT_PORT
+FIELD="dc:title"
+ACTION=""
+PATTERNS=()
+
+# --- semantic predicates ---
+
+is_debug()      { [[ $DEBUG == true ]]; }
+should_play()   { [[ $PLAY == true ]] || [[ $EDIT == true ]]; }
+should_edit()   { [[ $EDIT == true ]]; }
+has_pattern()   { [[ $# -gt 0 ]]; }
+is_ip()         { [[ "$1" =~ ^[0-9.]+$ ]]; }
+has_port()      { [[ "$1" == *:* ]]; }
+has_double_quotes() { [[ "$1" == *\"* ]]; }
+
+# --- utilities ---
+
+got() { [[ -n $1 ]]; }
+no()  { [[ -z $1 ]]; }
+
+ts() { date '+%H:%M:%S'; }
+die() { echo "[$(ts)] [ERROR] $*" >&2; exit 1; }
+
+debug() {
+    is_debug || return 0
+    echo "[$(ts)] [DEBUG] $*" >&2
+}
+
+debug_block() {
+    is_debug || return 0
+    echo "[$(ts)] [DEBUG] ----8<----" >&2
+    sed 's/^/    /' >&2
+}
+
+require() { command -v "$1" >/dev/null || die "Missing: $1"; }
+
+require_deps() {
+    require xq
+    require curl
+    if should_edit; then require vipe; fi
+}
+
+resolve_host() {
+    if is_ip "$1"; then echo "$1"; return 0; fi
+    getent hosts "$1" 2>/dev/null | awk '{print $1; exit}'
+}
+
+ensure_port() {
+    local HP=$1
+
+    has_port "$HP" || HP="${HP}:${DEFAULT_PORT}"
+    echo "$HP"
+}
+
+# --- soap templates ---
+
+browse_body() {
+    local ID=${1:-$ROOT_ID}
+
+    cat <<EOF
+<?xml version="1.0"?>
+<s:Envelope xmlns:s="${SOAP_NS}" s:encodingStyle="${SOAP_ENC}">
+ <s:Body>
+  <u:Browse xmlns:u="${CONTENT_DIR}">
+  <ObjectID>${ID}</ObjectID>
+  <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+  <Filter>@childCount</Filter>
+  <StartingIndex>0</StartingIndex>
+  <RequestedCount>${BROWSE_LIMIT}</RequestedCount>
+  <SortCriteria></SortCriteria>
+ </u:Browse></s:Body>
+</s:Envelope>
+EOF
+}
+
+search_body() {
+    local CRITERIA=$1
+
+    cat <<EOF
+<?xml version="1.0"?>
+<s:Envelope xmlns:s="${SOAP_NS}" s:encodingStyle="${SOAP_ENC}">
+ <s:Body>
+  <u:Search xmlns:u="${CONTENT_DIR}">
+   <ContainerID>${ROOT_ID}</ContainerID>
+   <SearchCriteria>(${CRITERIA})</SearchCriteria>
+   <Filter>*</Filter>
+   <StartingIndex>0</StartingIndex>
+   <RequestedCount>${SEARCH_LIMIT}</RequestedCount>
+   <SortCriteria>+dc:title</SortCriteria>
+  </u:Search>
+ </s:Body>
+</s:Envelope>
+EOF
+}
+
+# --- SOAP request ---
+
+soap_post() {
+    local URL=$1
+    local BODY=$2
+    local ACTION=$3
+    local RC
+    local CODE
+    local RESPONSE
+
+    if is_debug; then
+        cat >&2 <<EOF
+[$(ts)] [DEBUG] SOAP POST $URL ----8<----
+    curl -s -X POST '$URL' \\
+        -H 'User-Agent: ${USER_AGENT}' \\
+        -H 'Content-Type: text/xml; charset="utf-8"' \\
+        -H 'SOAPAction: "$ACTION"' \\
+        -d '$(sed '2,$s/^/            /' <<<"$BODY")
+           '
+EOF
+    fi
+
+    RC=$(
+        curl -s -w '%{http_code}' -X POST "$URL" \
+            -H "User-Agent: ${USER_AGENT}" \
+            -H 'Content-Type: text/xml; charset="utf-8"' \
+            -H "SOAPAction: \"$ACTION\"" \
+            -d "$BODY" 2>/dev/null
+    )
+
+    # curl -w appends HTTP status as last 3 chars; split body from code
+    if [[ ${#RC} -ge 3 ]]; then
+        CODE=${RC:${#RC}-3}
+        RESPONSE=${RC:0:${#RC}-3}
+    else
+        CODE="000"
+        RESPONSE=""
+    fi
+
+    if is_debug; then
+        debug "HTTP status: $CODE"
+    fi
+
+    printf '%s' "$RESPONSE"
+}
+
+# --- discovery ---
+
+extract_location_urls() {
+    tr -d '\r' | awk '/LOCATION/ {print $2}'
+}
+
+fetch_friendly_name() {
+    local URL=$1
+
+    debug "GET device description from $URL"
+    debug_block <<EOF
+curl -s '$URL' | xq -r '.root.device.friendlyName // "?"'
+EOF
+
+    curl -s "$URL" 2>/dev/null \
+    | xq -r '.root.device.friendlyName // "?"' 2>/dev/null
+}
+
+build_ssdp_query() {
+    printf 'M-SEARCH * HTTP/1.1\r\n'
+    printf 'Host: %s\r\n' "$SSDP_ADDR"
+    printf 'Man: "ssdp:discover"\r\n'
+    printf 'ST: %s\r\n' "$SSDP_ST"
+    printf 'MX: 3\r\n'
+}
+
+discover_servers() {
+    local HP
+    local NAME
+    local URL
+
+    require socat
+
+    build_ssdp_query \
+    | socat -T1 STDIO "UDP4-DATAGRAM:${SSDP_ADDR}" 2>/dev/null \
+    | extract_location_urls \
+    | while read -r URL; do
+        [[ "$URL" =~ ^http://([^/]+) ]] || continue
+        HP=$(ensure_port "${BASH_REMATCH[1]}")
+        NAME=$(fetch_friendly_name "$URL")
+        printf '%s\t%s\n' "$HP" "$NAME"
+    done
+}
+
+# --- response parsing ---
+
+parse_browse_response() {
+    debug "Parsing browse response"
+    debug_block <<'EOF'
+| xq -r '.["s:Envelope"]["s:Body"]["u:BrowseResponse"].Result' \
+| xq -r '
+         def _unwrap: if type == "array" then .[] else . end;
+         def entries: .container? + .item? | select(.) | _unwrap;
+         def id:          .["@id"];
+         def class:       .["upnp:class"];
+         def child_count: .["@childCount"] // "0";
+         def title:       .["dc:title"];
+         .["DIDL-Lite"] | entries | [id, class, child_count, title] | @tsv
+        '
+EOF
+
+    local DATA
+    DATA=$(
+        xq -r '.["s:Envelope"]["s:Body"]["u:BrowseResponse"].Result' 2>/dev/null \
+        | xq -r '
+                 def _unwrap: if type == "array" then .[] else . end;
+                 def entries: .container? + .item? | select(.) | _unwrap;
+                 def id:          .["@id"];
+                 def class:       .["upnp:class"];
+                 def child_count: .["@childCount"] // "0";
+                 def title:       .["dc:title"];
+                 .["DIDL-Lite"] | entries | [id, class, child_count, title] | @tsv
+                ' 2>/dev/null
+    ) || DATA=""
+
+    if got "$DATA"; then
+        column -t -s $'\t' <<< "$DATA" \
+        | { echo "┬"; sed 's/^/├── /'; }
+    fi
+}
+
+parse_search_response() {
+    debug "Parsing search response"
+    debug_block <<'EOF'
+| xq -r '.["s:Envelope"]["s:Body"]["u:SearchResponse"].Result' \
+| xq -r '
+         def _unwrap: if type == "array" then .[] else . end;
+         def entries: .item? + .container? | select(.) | _unwrap;
+         def id:          .["@id"];
+         def class:       .["upnp:class"];
+         def child_count: .["@childCount"] // "0";
+         def title:       .["dc:title"];
+         def uris:        .res | _unwrap | if type == "object" then .["#text"] else . end;
+         .["DIDL-Lite"] | entries | {uri: uris, title: title} | select(.uri | test("/MediaItems/")) | [.[]] | @tsv
+        '
+EOF
+
+    xq -r '.["s:Envelope"]["s:Body"]["u:SearchResponse"].Result' 2>/dev/null \
+    | xq -r '
+             def _unwrap: if type == "array" then .[] else . end;
+             def entries: .item? + .container? | select(.) | _unwrap;
+             def id:          .["@id"];
+             def class:       .["upnp:class"];
+             def child_count: .["@childCount"] // "0";
+             def title:       .["dc:title"];
+             def uris:        .res | _unwrap | if type == "object" then .["#text"] else . end;
+             .["DIDL-Lite"] | entries | {uri: uris, title: title} | select(.uri | test("/MediaItems/")) | [.[]] | @tsv
+            ' 2>/dev/null \
+    | sort -V
+}
+
+# --- commands ---
+
+cmd_list_servers() {
+    discover_servers
+}
+
+cmd_list_media() {
+    local ID
+    local URL
+    local RESPONSE
+
+    ID=${1:-$ROOT_ID}
+    got "$SERVER" || IFS=$':\t' read -r SERVER PORT _ < <(discover_servers | head -1)
+    got "$SERVER" || die "No servers found"
+
+    URL="http://${SERVER}:${PORT}"
+    echo "${URL} (Media Server)"
+    RESPONSE=$(soap_post "${URL}/ctl/ContentDir" "$(browse_body "$ID")" "${CONTENT_DIR}#Browse")
+    printf '%s' "$RESPONSE" | parse_browse_response
+}
+
+warn_about_quotes() {
+    has_double_quotes "$1" || return 0
+    debug "Warning: stripping double quote from pattern: $1"
+}
+
+build_search_criteria() {
+    local CRITERIA="upnp:class derivedfrom \"object.item\""
+    local SANITIZED
+
+    for PATTERN in "$@"; do
+        warn_about_quotes "$PATTERN"
+        SANITIZED=${PATTERN//\"/}
+        CRITERIA="${CRITERIA} and ${FIELD} contains \"${SANITIZED}\""
+    done
+    echo "$CRITERIA"
+}
+
+server_endpoints() {
+    if got "$SERVER"; then
+        echo "${SERVER}:${PORT}"
+    else
+        discover_servers | cut -f1
+    fi
+}
+
+search_server() {
+    local HOST=$1
+    local PORT=$2
+    local BODY=$3
+    local RESPONSE
+
+    RESPONSE=$(soap_post "http://${HOST}:${PORT}/ctl/ContentDir" "$BODY" "${CONTENT_DIR}#Search")
+    printf '%s' "$RESPONSE" | parse_search_response || true
+}
+
+play_urls() {
+    if [[ -t 1 ]]; then
+        tee /dev/tty | awk '{print $1}' | xargs -rxtd'\n' "$PLAYER"
+    else
+        awk '{print $1}' | xargs -rxtd'\n' "$PLAYER"
+    fi
+}
+
+maybe_edit() {
+    if should_edit; then vipe; else cat; fi
+}
+
+maybe_play() {
+    if should_play; then play_urls; else cat; fi
+}
+
+cmd_search() {
+    local CRITERIA
+    local BODY
+
+    has_pattern "$@" || die "Pattern required"
+
+    CRITERIA=$(build_search_criteria "$@")
+    debug "Search: $CRITERIA"
+    BODY=$(search_body "$CRITERIA")
+
+    server_endpoints \
+    | while IFS=: read -r H P; do
+        search_server "$H" "$P" "$BODY"
+    done \
+    | maybe_edit \
+    | maybe_play
+}
+
+# --- main ---
+
+usage() {
+    cat <<EOF
+Usage: ${SCRIPT} [OPTIONS] <subcommand> [args]
+
+Subcommands:
+  list-servers             list available DLNA media servers
+  list-media [ID]          list multimedia resources
+  search PATTERN...        search for patterns (default subcommand)
+
+Options:
+  --endpoint HOST[:PORT]   server endpoint (default: auto-discover)
+  -f, --field FIELD        search field (default: dc:title)
+  -d, --debug              debug mode
+  -p, --play               pipe URLs to player
+  -P, --play-edit          edit results before playing
+  -h, --help               show this help
+
+Examples:
+
+  ${SCRIPT} list-servers
+
+      192.168.1.187:8200  sphoczuth
+      192.168.1.35:8200   d319
+
+  ${SCRIPT} search --endpoint 192.168.1.35:8200 found
+
+      http://192.168.1.35:8200/MediaItems/22.mp4  some video
+      http://192.168.1.35:8200/MediaItems/23.mp4  another video
+
+  ${SCRIPT} search --endpoint 192.168.1.35:8200 --field upnp:artist found
+
+      http://192.168.1.35:8200/MediaItems/45.mp4  some video
+      http://192.168.1.35:8200/MediaItems/46.mp4  other video
+
+  ${SCRIPT} list-media --endpoint 192.168.1.35:8200 '0'
+
+      http://192.168.1.35:8200 (Media Server)
+      ┬
+      ├── 64  object.container.storageFolder  2  Browse Folders
+      ├── 1   object.container.storageFolder  7  Music
+      ├── 3   object.container.storageFolder  5  Pictures
+      ├── 2   object.container.storageFolder  3  Video
+
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            list-servers|list-media|search)
+                ACTION="$1"; shift ;;
+            --endpoint)
+                SERVER="${2%%:*}"
+                if has_port "$2"; then PORT="${2##*:}"; fi
+                shift 2 ;;
+            -f|--field)
+                FIELD="$2"; shift 2 ;;
+            -d|--debug)
+                DEBUG=true; shift ;;
+            -p|--play)
+                PLAY=true; shift ;;
+            -P|--play-edit)
+                EDIT=true; shift ;;
+            -h|--help)
+                usage; exit 0 ;;
+            -*)
+                die "Unknown option: $1" ;;
+            *)
+                got "$ACTION" || ACTION="search"
+                PATTERNS+=("$1"); shift ;;
+        esac
+    done
+}
+
+main() {
+    parse_args "$@"
+
+    require_deps
+    if got "$SERVER"; then SERVER=$(resolve_host "$SERVER") || die "Cannot resolve: $SERVER"; fi
+
+    case "$ACTION" in
+        list-servers) cmd_list_servers ;;
+        list-media)   cmd_list_media "${PATTERNS[0]:-}" ;;
+        search)       cmd_search "${PATTERNS[@]}" ;;
+        *)            usage; exit 1 ;;
+    esac
+}
+
+main "$@"
