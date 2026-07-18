@@ -26,6 +26,7 @@ Shell tools organized into useful **screws**, and **toys**.
 | `mutexec` | Clean wrapper around &>/dev/null |
 | `nugget` | PKGBUILD-style downloader (URLs, archives, VCS) |
 | `pdsc` | List process descendants |
+| `playerctl-my` | MPRIS media player control via D-Bus (no glib deps) |
 | `pup.js` | CSS selector HTML filter (stdin→selector→html/text/attr/json) |
 | `rssh` | Sync directory to remote host, run commands |
 | `slay` | Kill processes with SIGKILL |
@@ -38,7 +39,7 @@ Shell tools organized into useful **screws**, and **toys**.
 | `zenexec` | Clean wrapper around 2>/dev/null |
 | `zrun` | Run commands from compressed scripts |
 
-C source: `prefix.c`, `path-expand.c`, `path-shorten.c`
+C source (with bash alternatives): `prefix.c`, `path-expand.c`/`.sh`, `path-shorten.c`/`.sh`
 
 ## toys/
 

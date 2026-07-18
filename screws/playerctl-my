@@ -1,0 +1,1060 @@
+#!/usr/bin/env bash
+# playerctl — control MPRIS media players via D-Bus
+#
+# WHAT IT DOES
+# Drop-in replacement for playerctl(1) in pure bash. Controls any media
+# player implementing the MPRIS D-Bus specification
+# (org.mpris.MediaPlayer2.Player): Spotify, VLC, Firefox, Chromium,
+# mpv, Strawberry, and others.
+#
+# WHY
+# Avoids the playerctl C dependency (glib/GIO). Uses busctl (systemd)
+# and jq — already present on any systemd system. --follow uses busctl
+# monitor (D-Bus signals, not polling).
+#
+# HOW IT WORKS
+# Lists MPRIS players via org.freedesktop.DBus.ListNames using
+# busctl --json, filters with jq, resolves player selection, then
+# dispatches commands via busctl call/get-property/set-property.
+# Metadata keys are resolved generically — no hardcoded key list.
+# --follow subscribes to PropertiesChanged signals and re-queries
+# on each change.
+#
+# USAGE
+#     playerctl [options] <command> [args]
+#
+# OPTIONS
+#   Player selection (default: first running):
+#     -p, --player NAME        Comma-separated player names
+#                              Supports name or name.INSTANCE
+#                              Special name %any selects all
+#     -a, --all-players        Target all running players
+#     -i, --ignore-player NAME Comma-separated players to skip
+#     -l, --list-all           Print running players and exit
+#
+#   Output:
+#     -f, --format FORMAT      Go template-like format string
+#                              See FORMAT below for syntax
+#     -F, --follow             Print once, then block and print
+#                              on every property change
+#     -s, --no-messages        Suppress [INFO] diagnostics
+#
+#   Other:
+#     -V, --version            Show version
+#     -h, --help               Show this help
+#
+# COMMANDS
+#     play                     Start playback
+#     pause                    Pause playback
+#     play-pause               Toggle play/pause
+#     stop                     Stop playback
+#     next                     Next track
+#     previous                 Previous track
+#     position [OFFSET][+/-]   Get position or seek (seconds)
+#                              OFFSET+ seeks forward, OFFSET- backward
+#                              Bare number sets absolute position
+#     volume [LEVEL][+/-]      Get or set volume (0.0-1.0)
+#                              LEVEL+ / LEVEL- for relative adjust
+#                              Clamped to [0, 1]
+#     status                   Print PlaybackStatus
+#     metadata [KEY]           Print all metadata or one key
+#     open URI                 Open media URI in player
+#     loop [STATUS]            Get or set loop (None/Track/Playlist)
+#     shuffle [STATUS]         Get or set shuffle (On/Off/Toggle)
+#
+# FORMAT
+#   Supports Go template-like {{...}} placeholders in -f strings.
+#   Simple variables reference metadata keys or special vars:
+#     playerName               Short player name
+#     position                 Position in microseconds
+#     status                   PlaybackStatus string
+#     volume                   Volume level (0.0-1.0)
+#     title, artist, album     Standard xesam metadata keys
+#     mpris:trackid            Track ID
+#     (any metadata key)       Resolved generically; tries bare key,
+#                              then xesam:KEY
+#
+#   Functions:
+#     {{lc VALUE}}             Lowercase
+#     {{uc VALUE}}             Uppercase
+#     {{default A B}}          A if non-empty, else B
+#     {{duration USEC}}        Microseconds to H:MM:SS
+#     {{emoji VALUE}}          Playing->▶ Paused->⏸ Stopped->⏹
+#                              Volume->🔇🔈🔉🔊 based on level
+#     {{trunc S N}}            Truncate string S to N chars, add …
+#     {{markup_escape VALUE}}  HTML-escape for notifications
+#
+#   Math: {{position / 1000000}}, {{volume * 100}}
+#
+#   Example:
+#     -f "{{trunc (default title "Untitled") 30}} - {{artist}}"
+#
+# EXAMPLES
+#     playerctl play
+#     playerctl -p spotify,vlc next
+#     playerctl -a stop
+#     playerctl -i firefox status
+#     playerctl -f "{{title}} - {{artist}}" status
+#     playerctl -F metadata
+#     playerctl position 30+
+#     playerctl position 0
+#     playerctl volume 0.5
+#     playerctl volume 0.1+
+#     playerctl loop Track
+#     playerctl shuffle toggle
+#     playerctl open https://example.com/audio.mp3
+#
+# EXIT CODES
+#     0   Success
+#     1   General error (no players, bad option, bad arg)
+#     2   Player returned error (command rejected)
+#
+# DEPENDENCIES
+#     busctl (systemd), jq
+#
+# LIMITATIONS
+#     Not implemented vs upstream playerctl(1):
+#     --print-slice (slice metadata by index)
+#     --no-dbus (print D-Bus method calls instead of executing)
+#     playback-status as alias for status
+#
+#     All commands operate on the PlaybackStatus, Volume, Position,
+#     and Metadata properties. The TrackList interface is limited
+#     to LoopStatus and Shuffle — no track list navigation.
+
+set -euo pipefail
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+readonly MPRIS_PREFIX="org.mpris.MediaPlayer2."
+readonly MPRIS_OBJ="/org/mpris/MediaPlayer2"
+readonly PLAYER_IFACE="org.mpris.MediaPlayer2.Player"
+readonly TRACKLIST_IFACE="org.mpris.MediaPlayer2.TrackList"
+
+readonly EXIT_ERR=2
+readonly VERSION="playerctl 0.1 (bash reimplementation)"
+
+# ============================================================================
+# Predicates
+# ============================================================================
+
+
+is_delta()          { [[ $1 =~ ^([0-9.e+-]+)([+-])$ ]]; }
+is_plain_number()   { [[ $1 =~ ^[0-9.e+-]+$ ]]; }
+is_wildcard()       { [[ $1 == "%any" ]]; }
+has_args()          { [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; }
+has_command()       { [[ -n "${1-}" ]]; }
+has_operand()       { [[ $# -ge 2 ]]; }
+
+# got/no — check named variable presence (variable carries domain)
+got() { [[ -n "${1-}" ]]; }
+no()  { [[ -z "${1-}" ]]; }
+
+# follow signal predicates
+is_our_sender()     { [[ $1 == "$2" ]]; }
+is_player_signal()  { [[ $1 == "$PLAYER_IFACE" ]]; }
+property_changed()  { grep -qxF "$1" <<< "$2" >/dev/null 2>&1; }
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+timestamp() { date '+%H:%M:%S'; }
+
+die() {
+    local TIMESTAMP
+    TIMESTAMP=$(timestamp)
+    printf '%s [ERROR] %s\n' "$TIMESTAMP" "$*" >&2
+    exit 1
+}
+
+info() {
+    if got "$NO_MESSAGES"; then return; fi
+    local TIMESTAMP
+    TIMESTAMP=$(timestamp)
+    printf '%s [INFO] %s\n' "$TIMESTAMP" "$*"
+}
+
+# ============================================================================
+# D-Bus Primitives (busctl)
+# ============================================================================
+
+busctl_call() { busctl --user call "$@"; }
+
+busctl_get() {
+    local SERVICE=$1
+    local IFACE=$2
+    local PROPERTY=$3
+    busctl --user --json=short get-property "$SERVICE" "$MPRIS_OBJ" "$IFACE" "$PROPERTY"
+}
+
+busctl_set() {
+    local SERVICE=$1
+    local IFACE=$2
+    local PROPERTY=$3
+    local TYPE=$4
+    local VALUE=$5
+    busctl --user set-property "$SERVICE" "$MPRIS_OBJ" "$IFACE" "$PROPERTY" "$TYPE" "$VALUE"
+}
+
+busctl_call_silent() {
+    busctl_call "$@" >/dev/null 2>&1 || return $EXIT_ERR
+}
+
+busctl_set_silent() {
+    busctl_set "$@" >/dev/null 2>&1 || return $EXIT_ERR
+}
+
+# JSON value extractors — pipe from busctl_get
+jq_str()  { jq -r '.data // empty'; }
+
+jq_num() {
+    jq -r '.data' | awk '{ printf "%g\n", $1 }'
+}
+
+jq_bool() {
+    jq -r '.data | if . then "true" else "false" end'
+}
+
+# ============================================================================
+# Player Discovery
+# ============================================================================
+
+# list_players → short names, one per line
+
+list_players() {
+    busctl --user --json=short call org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus ListNames 2>/dev/null \
+    | jq -r --arg prefix "$MPRIS_PREFIX" '
+        .data[] | map(
+            select(startswith($prefix)) |
+            sub($prefix; "")
+        ) | .[]
+    '
+}
+# bus_name SHORT → full D-Bus bus name
+bus_name() { printf '%s%s\n' "$MPRIS_PREFIX" "$1"; }
+
+# player_unique BUSNAME → D-Bus unique name (:1.xxx)
+player_unique() {
+    busctl --user --json=short call org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s "$1" \
+        2>/dev/null \
+    | jq -r '.data[]'
+}
+
+# filter_ignored PLAYERS → players minus ignored
+filter_ignored() {
+    local ALL=$1
+    local NAME
+
+    got "$IGNORE_NAMES" || { printf '%s\n' "$ALL"; return 0; }
+
+    for NAME in $(tr ',' ' ' <<< "$IGNORE_NAMES"); do
+        ALL=$(grep -vx -e "$NAME" -e "${NAME}\..*" <<< "$ALL" || true)
+    done
+
+    printf '%s\n' "$ALL"
+}
+
+# select_players PLAYERS → matching -p selection
+select_players() {
+    local ALL=$1
+    local NAME
+    local MATCHES
+    local RESULT=
+
+    for NAME in $(tr ',' ' ' <<< "$PLAYER_NAMES"); do
+        if is_wildcard "$NAME"; then
+            RESULT="${RESULT}${ALL}"$'\n'
+        else
+            MATCHES=$(grep -x -e "$NAME" -e "${NAME}\..*" <<< "$ALL" || true)
+            if got "$MATCHES"; then RESULT="${RESULT}${MATCHES}"$'\n'; fi
+        fi
+    done
+
+    got "$RESULT" || die "No matching players found"
+    printf '%s\n' "$RESULT"
+}
+
+# pick_first PLAYERS → first player
+pick_first() {
+    local FIRST
+
+    FIRST=$(head -1 <<< "$1")
+    got "$FIRST" || die "No players available"
+    printf '%s\n' "$FIRST"
+}
+
+# first_player → resolve and return first
+first_player() {
+    local ALL
+    ALL=$(resolve_players) || die "No available players"
+    pick_first "$ALL"
+}
+
+# resolve_players → short names, one per line
+resolve_players() {
+    local ALL
+    ALL=$(list_players) || die "No running MPRIS players found"
+
+    ALL=$(filter_ignored "$ALL")
+
+    if got "$ALL_PLAYERS"; then printf '%s\n' "$ALL"; return; fi
+    if got "$PLAYER_NAMES"; then
+        select_players "$ALL"
+        return
+    fi
+
+    pick_first "$ALL"
+}
+
+# ============================================================================
+# Command Implementations
+# ============================================================================
+
+# player_method PLAYER METHOD — call a no-arg D-Bus method on the player
+player_method() {
+    local PLAYER=$1
+    local METHOD=$2
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+    busctl_call_silent "$BUSNAME" "$MPRIS_OBJ" "$PLAYER_IFACE" "$METHOD"
+}
+
+cmd_play()       { player_method "$1" Play; }
+cmd_pause()      { player_method "$1" Pause; }
+cmd_play_pause() { player_method "$1" PlayPause; }
+cmd_stop()       { player_method "$1" Stop; }
+cmd_next()       { player_method "$1" Next; }
+cmd_prev()       { player_method "$1" Previous; }
+
+# cmd_status — print play status
+cmd_status() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if got "$FORMAT"; then expand_format "$BUSNAME" "$PLAYER"; return; fi
+
+    busctl_get "$BUSNAME" "$PLAYER_IFACE" PlaybackStatus | jq_str
+}
+
+# set_volume_level BUSNAME LEVEL — clamp [0,1] and set
+set_volume_level() {
+    local BUSNAME=$1
+    local LEVEL=$2
+
+    LEVEL=$(awk -v l="$LEVEL" 'BEGIN { if (l < 0) print 0; else if (l > 1) print 1; else print l }')
+    busctl_set "$BUSNAME" "$PLAYER_IFACE" Volume d "$LEVEL" || return $EXIT_ERR
+}
+
+# cmd_volume — get, set, or adjust
+cmd_volume() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if ! has_operand "$@"; then
+        if got "$FORMAT"; then expand_format "$BUSNAME" "$PLAYER"; return; fi
+        busctl_get "$BUSNAME" "$PLAYER_IFACE" Volume | jq_num
+        return
+    fi
+
+    local ARG=$2
+
+    if is_delta "$ARG"; then
+        adjust_volume "$BUSNAME" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return
+    fi
+
+    is_plain_number "$ARG" || die "Cannot parse volume: $ARG"
+    set_volume_level "$BUSNAME" "$ARG"
+}
+
+# adjust_volume BUSNAME VAL SIGN — relative volume change
+adjust_volume() {
+    local BUSNAME=$1
+    local VAL=$2
+    local SIGN=$3
+    local CURRENT
+
+    CURRENT=$(busctl_get "$BUSNAME" "$PLAYER_IFACE" Volume | jq_num)
+    VAL=$(awk -v c="$CURRENT" -v s="$SIGN" -v v="$VAL" 'BEGIN { printf "%.10f", c s v }')
+    set_volume_level "$BUSNAME" "$VAL"
+}
+
+# seek_relative BUSNAME OFFSET SIGN
+seek_relative() {
+    local BUSNAME=$1
+    local OFFSET=$2
+    local SIGN=$3
+    local USEC
+
+    USEC=$(awk -v o="$OFFSET" 'BEGIN { printf "%.0f", o * 1000000 }')
+    if [[ $SIGN == "-" ]]; then USEC="-${USEC}"; fi
+    busctl_call_silent "$BUSNAME" "$MPRIS_OBJ" "$PLAYER_IFACE" Seek x "$USEC"
+}
+
+# seek_absolute BUSNAME SECONDS
+seek_absolute() {
+    local BUSNAME=$1
+    local SEC=$2
+    local USEC
+    local JSON
+    local TRACKID
+
+    USEC=$(awk -v s="$SEC" 'BEGIN { printf "%.0f", s * 1000000 }')
+
+    JSON=$(meta_json "$BUSNAME")
+    TRACKID=$(meta_get "$JSON" "mpris:trackid")
+
+    got "$TRACKID" || die "Cannot set absolute position: no track ID"
+    busctl_call_silent "$BUSNAME" "$MPRIS_OBJ" "$PLAYER_IFACE" SetPosition \
+        o "$TRACKID" x "$USEC"
+}
+
+# cmd_position — get or seek
+cmd_position() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if ! has_operand "$@"; then
+        if got "$FORMAT"; then expand_format "$BUSNAME" "$PLAYER"; return; fi
+        local USEC
+        USEC=$(busctl_get "$BUSNAME" "$PLAYER_IFACE" Position | jq_num)
+        awk -v u="$USEC" 'BEGIN { printf "%.6f\n", u / 1000000 }'
+        return
+    fi
+
+    local ARG=$2
+
+    if is_delta "$ARG"; then
+        seek_relative "$BUSNAME" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return
+    fi
+
+    seek_absolute "$BUSNAME" "$ARG"
+}
+
+# cmd_open — open URI in player
+cmd_open() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+    busctl_call_silent "$BUSNAME" "$MPRIS_OBJ" "$PLAYER_IFACE" OpenUri s "$2"
+}
+
+# cmd_loop — get or set loop status
+cmd_loop() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if ! has_operand "$@"; then
+        busctl_get "$BUSNAME" "$TRACKLIST_IFACE" LoopStatus 2>/dev/null | jq_str
+        return
+    fi
+
+    set_loop "$BUSNAME" "$2"
+}
+
+# set_loop BUSNAME STATUS
+set_loop() {
+    local BUSNAME=$1
+    local STATUS=$2
+
+    case "${STATUS,,}" in
+        none)     busctl_set_silent "$BUSNAME" "$TRACKLIST_IFACE" LoopStatus s None;;
+        track)    busctl_set_silent "$BUSNAME" "$TRACKLIST_IFACE" LoopStatus s Track;;
+        playlist) busctl_set_silent "$BUSNAME" "$TRACKLIST_IFACE" LoopStatus s Playlist;;
+        *)        die "Unknown loop status: $STATUS";;
+    esac
+}
+
+# is_shuffling BUSNAME — true if shuffle enabled
+is_shuffling() {
+    local VAL
+    VAL=$(busctl_get "$1" "$TRACKLIST_IFACE" Shuffle 2>/dev/null | jq_bool)
+    [[ $VAL == "true" ]]
+}
+
+# cmd_shuffle — get, set, or toggle
+cmd_shuffle() {
+    local PLAYER=$1
+    local BUSNAME
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if ! has_operand "$@"; then
+        busctl_get "$BUSNAME" "$TRACKLIST_IFACE" Shuffle 2>/dev/null \
+            | jq_bool | sed 's/true/On/; s/false/Off/'
+        return
+    fi
+
+    set_shuffle "$BUSNAME" "$2"
+}
+
+# set_shuffle BUSNAME STATE (on|off|toggle)
+set_shuffle_state() {
+    busctl_set_silent "$1" "$TRACKLIST_IFACE" Shuffle b "$2"
+}
+
+set_shuffle() {
+    local BUSNAME=$1
+    local STATE=$2
+
+    case "${STATE,,}" in
+        on)  set_shuffle_state "$BUSNAME" true;;
+        off) set_shuffle_state "$BUSNAME" false;;
+        toggle)
+            if is_shuffling "$BUSNAME"; then
+                set_shuffle_state "$BUSNAME" false
+            else
+                set_shuffle_state "$BUSNAME" true
+            fi
+            ;;
+        *) die "Unknown shuffle: $STATE";;
+    esac
+}
+
+# ============================================================================
+# Metadata helpers
+# ============================================================================
+
+# meta_json BUSNAME → JSON dict of all metadata
+meta_json() {
+    local BUSNAME=$1
+    busctl_get "$BUSNAME" "$PLAYER_IFACE" Metadata | jq -c '.data'
+}
+
+# meta_get JSON KEY → value
+#   Tries KEY, then xesam:KEY. Arrays joined by comma. Unknown keys → "".
+meta_get() {
+    local JSON=$1
+    local KEY=$2
+    jq -r --arg key "$KEY" '
+        .[$key].data // .["xesam:" + $key].data // null
+        | if . == null then ""
+          elif type == "array" then join(",")
+          else tostring
+          end
+    ' <<< "$JSON"
+}
+
+# meta_print BUSNAME → "player key value" lines
+meta_print() {
+    local BUSNAME=$1
+    local JSON
+    local PLAYER
+
+    JSON=$(meta_json "$BUSNAME")
+    PLAYER=${BUSNAME#"$MPRIS_PREFIX"}
+    jq -r --arg player "$PLAYER" '
+        to_entries | .[] |
+        "\($player) \(.key | sub("^xesam:"; "")) \(.value.data |
+            if type == "array" then join(",") else tostring end)"
+    ' <<< "$JSON"
+}
+
+# cmd_metadata — print track metadata
+cmd_metadata() {
+    local PLAYER=$1
+    local BUSNAME
+    shift
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if got "$FORMAT"; then expand_format "$BUSNAME" "$PLAYER"; return; fi
+
+    if has_operand "$@"; then
+        meta_get "$(meta_json "$BUSNAME")" "$1"
+        return
+    fi
+
+    meta_print "$BUSNAME"
+}
+
+# ============================================================================
+# Format string system
+#   Supports {{key}}, {{func(args)}}, {{math expr}}.
+#   Special variables: playerName, position, status, volume.
+#   Functions: lc, uc, markup_escape, default, duration, emoji, trunc.
+# ============================================================================
+
+# resolve_format_var BUSNAME PLAYER KEY → value
+#   Special vars from player properties; everything else from metadata.
+resolve_format_var() {
+    local BUSNAME=$1
+    local PLAYER=$2
+    local KEY=$3
+
+    case "$KEY" in
+        playerName) printf '%s' "$PLAYER";;
+        position)
+            local USEC
+            USEC=$(busctl_get "$BUSNAME" "$PLAYER_IFACE" Position | jq_num)
+            awk -v u="$USEC" 'BEGIN { printf "%.0f", u }'
+            ;;
+        status)
+            busctl_get "$BUSNAME" "$PLAYER_IFACE" PlaybackStatus | jq_str
+            ;;
+        volume)
+            busctl_get "$BUSNAME" "$PLAYER_IFACE" Volume | jq_num
+            ;;
+        *)
+            meta_get "$(meta_json "$BUSNAME")" "$KEY"
+            ;;
+    esac
+}
+
+# eval_format_expr BUSNAME PLAYER EXPR → evaluated expression
+#   EXPR is content inside {{ }}. Handles:
+#   - Simple variable: key
+#   - Function call: func(args)
+#   - Math: expr with + - * /
+eval_format_expr() {
+    local BUSNAME=$1
+    local PLAYER=$2
+    local EXPR=$3
+
+    if [[ "$EXPR" =~ ^[a-zA-Z0-9_:.-]+$ ]]; then
+        resolve_format_var "$BUSNAME" "$PLAYER" "$EXPR"
+        return
+    fi
+
+    if [[ "$EXPR" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)"("(.+)")"$ ]]; then
+        eval_format_func "$BUSNAME" "$PLAYER" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return
+    fi
+
+    eval_format_math "$BUSNAME" "$PLAYER" "$EXPR"
+}
+
+# Format function helpers — each handles one {{func(args)}} template function
+fmt_lc() {
+    local VALUE
+
+    VALUE=$(eval_format_expr "$1" "$2" "$3")
+    printf '%s' "$VALUE" | tr '[:upper:]' '[:lower:]'
+}
+
+fmt_uc() {
+    local VALUE
+
+    VALUE=$(eval_format_expr "$1" "$2" "$3")
+    printf '%s' "$VALUE" | tr '[:lower:]' '[:upper:]'
+}
+
+fmt_escape() {
+    local VALUE
+
+    VALUE=$(eval_format_expr "$1" "$2" "$3")
+    sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' <<< "$VALUE"
+}
+fmt_default() {
+    local ARGS=$3
+    local VALUE
+    local DEFAULT
+
+    DEFAULT=${ARGS#*,}
+    DEFAULT=${DEFAULT# }
+    VALUE=$(eval_format_expr "$1" "$2" "${ARGS%%,*}")
+
+    if [[ -n "$VALUE" ]]; then
+        printf '%s' "$VALUE"
+    else
+        eval_format_expr "$1" "$2" "$DEFAULT"
+    fi
+}
+fmt_duration() {
+    local USEC
+
+    USEC=$(eval_format_expr "$1" "$2" "$3")
+    awk -v u="$USEC" '
+        BEGIN {
+            t = int(u / 1000000)
+            h = int(t / 3600)
+            m = int((t % 3600) / 60)
+            s = t % 60
+            printf "%02d:%02d:%02d", h, m, s
+        }
+    '
+}
+volume_emoji() {
+    local VOLUME=$1
+
+    awk -v v="$VOLUME" '
+        BEGIN {
+            if (v+0 < 0.01) printf "🔇"
+            else if (v+0 < 0.33) printf "🔈"
+            else if (v+0 < 0.66) printf "🔉"
+            else printf "🔊"
+        }
+    '
+}
+
+fmt_emoji() {
+    local VALUE
+
+    VALUE=$(eval_format_expr "$1" "$2" "$3")
+
+    case "${VALUE,,}" in
+        playing) printf '▶';;
+        paused)  printf '⏸';;
+        stopped) printf '⏹';;
+        *)       volume_emoji "$VALUE";;
+    esac
+}
+fmt_trunc() {
+    local ARGS=$3
+    local TARGET
+    local LIMIT
+    local VALUE
+
+    TARGET=${ARGS%%,*}
+    LIMIT=${ARGS#*,}
+    LIMIT=${LIMIT# }
+    VALUE=$(eval_format_expr "$1" "$2" "$TARGET")
+    awk -v s="$VALUE" -v n="$LIMIT" '
+        BEGIN {
+            if (length(s) > n)
+                printf "%s…", substr(s, 1, n-1)
+            else
+                printf "%s", s
+        }
+    '
+}
+
+# eval_format_func BUSNAME PLAYER FUNC ARGS
+eval_format_func() {
+    local BUSNAME=$1
+    local PLAYER=$2
+    local FUNC=$3
+    local ARGS=$4
+
+    case "$FUNC" in
+        lc)            fmt_lc "$BUSNAME" "$PLAYER" "$ARGS";;
+        uc)            fmt_uc "$BUSNAME" "$PLAYER" "$ARGS";;
+        markup_escape) fmt_escape "$BUSNAME" "$PLAYER" "$ARGS";;
+        default)       fmt_default "$BUSNAME" "$PLAYER" "$ARGS";;
+        duration)      fmt_duration "$BUSNAME" "$PLAYER" "$ARGS";;
+        emoji)         fmt_emoji "$BUSNAME" "$PLAYER" "$ARGS";;
+        trunc)         fmt_trunc "$BUSNAME" "$PLAYER" "$ARGS";;
+        *)             die "Unknown format function: $FUNC";;
+    esac
+}
+
+# eval_format_math BUSNAME PLAYER EXPR
+#   Replace template refs, evaluate with awk.
+eval_format_math() {
+    local BUSNAME=$1
+    local PLAYER=$2
+    local EXPR=$3
+    local RESOLVED=$3
+    local VAL
+    local VAR
+
+    while [[ "$RESOLVED" =~ \{\{([^}]+)\}\} ]]; do
+        local INNER=${BASH_REMATCH[0]}
+        local INNER_KEY=${BASH_REMATCH[1]}
+        VAL=$(eval_format_expr "$BUSNAME" "$PLAYER" "$INNER_KEY")
+        RESOLVED=${RESOLVED//"$INNER"/$VAL}
+    done
+
+    for VAR in playerName position status volume; do
+        VAL=$(resolve_format_var "$BUSNAME" "$PLAYER" "$VAR")
+        RESOLVED=${RESOLVED//"$VAR"/$VAL}
+    done
+
+    awk -v r="$RESOLVED" 'BEGIN { printf "%g", r }'
+}
+
+# expand_format BUSNAME PLAYER — replace {{...}} placeholders
+expand_format() {
+    local BUSNAME=$1
+    local PLAYER=$2
+    local FMT=$FORMAT
+    local TOKEN
+    local EXPR
+    local VALUE
+    local escaped_token
+    local escaped_value
+
+    local TOKENS
+    TOKENS=$(printf '%s\n' "$FMT" | grep -o '{{[^}]*}}' || true)
+
+    while IFS= read -r TOKEN; do
+        if [[ -z "$TOKEN" ]]; then continue; fi
+
+        EXPR=${TOKEN#\{\{}; EXPR=${EXPR%\}\}}
+        VALUE=$(eval_format_expr "$BUSNAME" "$PLAYER" "$EXPR")
+
+        escaped_token=$(sed 's/[][\\^$.*/&]/\\&/g' <<< "$TOKEN")
+        escaped_value=$(sed 's/[][\\^$.*/&]/\\&/g' <<< "${VALUE:-}")
+        FMT=$(sed "s/${escaped_token}/${escaped_value}/g" <<< "$FMT")
+    done <<< "$TOKENS"
+
+    printf '%s\n' "$FMT"
+}
+
+# ============================================================================
+# --follow (signal subscription via busctl monitor)
+# ============================================================================
+
+# follow_command PLAYER BUSNAME CMD
+#   Print current value, then block and print on each property change.
+follow_command() {
+    local CMD=$1
+    local PLAYER=$2
+    local BUSNAME=$3
+    local WATCH
+
+    case "$CMD" in
+        status)   WATCH="PlaybackStatus" ;;
+        volume)   WATCH="Volume" ;;
+        metadata) WATCH="Metadata" ;;
+        position) WATCH="Position" ;;
+        *)        die "Cannot follow: $CMD";;
+    esac
+
+    run_query "$CMD" "$PLAYER"
+    follow_signals "$BUSNAME" "$WATCH" "$CMD" "$PLAYER"
+}
+
+# follow_signals BUSNAME WATCH CMD PLAYER
+follow_signals() {
+    local BUSNAME=$1
+    local WATCH=$2
+    local CMD=$3
+    local PLAYER=$4
+    local UNIQUE
+
+    UNIQUE=$(player_unique "$BUSNAME") || die "Cannot resolve player: $BUSNAME"
+
+    busctl monitor --user --json=short \
+        --match "member=PropertiesChanged" 2>/dev/null \
+    | while IFS= read -r LINE; do
+        signal_changed "$LINE" "$UNIQUE" "$WATCH" "$CMD" "$PLAYER"
+    done
+}
+
+# signal_changed LINE UNIQUE WATCH CMD PLAYER
+signal_changed() {
+    local LINE=$1
+    local UNIQUE=$2
+    local WATCH=$3
+    local CMD=$4
+    local PLAYER=$5
+    local SENDER
+    local IFACE
+    local CHANGED
+
+    SENDER=$(jq -r '.sender // empty' <<< "$LINE")
+    IFACE=$(jq -r '.payload.data[0] // empty' <<< "$LINE")
+
+    is_our_sender "$SENDER" "$UNIQUE" || return
+    is_player_signal "$IFACE" || return
+
+    CHANGED=$(jq -r '.payload.data[1] | keys[]' <<< "$LINE" 2>/dev/null || true)
+    property_changed "$WATCH" "$CHANGED" || return
+
+    run_query "$CMD" "$PLAYER"
+}
+
+# run_query CMD PLAYER
+run_query() {
+    local CMD=$1
+    local PLAYER=$2
+    dispatch_command "cmd_${CMD}" "$PLAYER"
+}
+
+# ============================================================================
+# Option Parsing
+# ============================================================================
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: playerctl [options] <command> [args]
+
+Player selection (default: first running):
+  -p, --player NAME        Comma-separated names (name or name.INSTANCE)
+  -a, --all-players        Target all players
+  -i, --ignore-player NAME Comma-separated players to skip
+  -l, --list-all           Print running players and exit
+
+Output:
+  -f, --format FORMAT      Go template-like format ({{title}}, {{artist}}, ...)
+  -F, --follow             Print once, then block and print on change
+  -s, --no-messages        Suppress diagnostics
+
+Other:
+  -V, --version            Show version
+  -h, --help               Show this help
+
+Commands:
+  play                     Start
+  pause                    Pause
+  play-pause               Toggle
+  stop                     Stop
+  next                     Next track
+  previous                 Previous track
+  position [OFFSET][+/-]   Get or seek (seconds)
+  volume [LEVEL][+/-]      Get or set (0.0-1.0)
+  status                   Play status
+  metadata [KEY]           Print metadata
+  open URI                 Open URI
+  loop [STATUS]            Get/set loop (None/Track/Playlist)
+  shuffle [STATUS]         Get/set shuffle (On/Off/Toggle)
+
+Format variables: playerName, position, status, volume, any metadata key
+Format functions: lc, uc, default(a,b), duration(usec), emoji(status|volume), trunc(s,n)
+
+Examples:
+  playerctl play
+  playerctl -p spotify,vlc next
+  playerctl -a stop
+  playerctl -f "{{title}} - {{artist}}" status
+  playerctl -F metadata
+  playerctl position 30+
+  playerctl volume 0.5
+EOF
+    exit 0
+}
+
+parse_options() {
+    PLAYER_NAMES=
+    ALL_PLAYERS=
+    FORMAT=
+    NO_MESSAGES=
+    FOLLOW=
+    IGNORE_NAMES=
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)        usage;;
+            -l|--list-all)    list_players; exit 0;;
+            -p|--player)      shift; PLAYER_NAMES=$1;;
+            -a|--all-players) ALL_PLAYERS=1;;
+            -i|--ignore-player) shift; IGNORE_NAMES=$1;;
+            -f|--format)      shift; FORMAT=$1;;
+            -F|--follow)      FOLLOW=1;;
+            -s|--no-messages) NO_MESSAGES=1;;
+            -V|--version)     printf '%s\n' "$VERSION"; exit 0;;
+            --)               shift; break;;
+            -*)               die "Unknown option: $1";;
+            *)                break;;
+        esac
+        shift
+    done
+
+    COMMAND=${1-}
+    shift || true
+    COMMAND_ARGS=("$@")
+
+    has_command "$COMMAND" || usage
+}
+
+# ============================================================================
+# Dispatch
+# ============================================================================
+
+# dispatch_command CMD PLAYER ARGS...
+dispatch_command() {
+    local CMD=$1
+    local PLAYER=$2
+    shift 2
+    "$CMD" "$PLAYER" "$@"
+}
+
+exec_player_cmd() {
+    local CMD=$1
+    local PLAYER=$2
+
+    shift 2
+    if ! "$CMD" "$PLAYER" "$@"; then
+        info "Player $PLAYER: command failed"
+    fi
+}
+
+for_each_player() {
+    local CMD=$1
+    local PLAYERS
+    local PLAYER
+    shift
+    PLAYERS=$(resolve_players) || die "No available players"
+
+    while IFS= read -r PLAYER; do
+        exec_player_cmd "cmd_${CMD}" "$PLAYER" "$@"
+    done <<< "$PLAYERS"
+}
+
+is_known_command() {
+    case "$1" in
+        play|pause|play-pause|stop|next|previous|\
+        status|metadata|position|volume|open|\
+        loop|shuffle)
+            return 0;;
+        *)  return 1;;
+    esac
+}
+
+resolve_command_name() {
+    local NAME=$1
+
+    case "$NAME" in
+        play-pause) printf 'play_pause';;
+        previous)   printf 'prev';;
+        *)          printf '%s' "$NAME";;
+    esac
+}
+
+dispatch_property_cmd() {
+    local CMD=$1
+    local PLAYER
+    local BUSNAME
+
+    PLAYER=$(first_player)
+    BUSNAME=$(bus_name "$PLAYER")
+
+    if got "$FOLLOW" && ! has_args; then
+        follow_command "$CMD" "$PLAYER" "$BUSNAME"
+    else
+        dispatch_command "cmd_${CMD}" "$PLAYER" "${COMMAND_ARGS[@]}"
+    fi
+}
+
+dispatch_tracklist_cmd() {
+    local CMD=$1
+
+    if has_args; then
+        for_each_player "$CMD" "${COMMAND_ARGS[@]}"
+    else
+        dispatch_command "cmd_${CMD}" "$(first_player)"
+    fi
+}
+
+dispatch() {
+    local CMD
+
+    is_known_command "$COMMAND" || die "Unknown command: $COMMAND"
+    CMD=$(resolve_command_name "$COMMAND")
+
+    case "$COMMAND" in
+        status|metadata|position|volume)  dispatch_property_cmd "$CMD";;
+        loop|shuffle)                     dispatch_tracklist_cmd "$CMD";;
+        *)                                for_each_player "$CMD" "${COMMAND_ARGS[@]}";;
+    esac
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    parse_options "$@"
+    dispatch
+}
+
+main "$@"
