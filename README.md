@@ -31,6 +31,7 @@ Shell tools organized into useful **screws**, and **toys**.
 | `pup.js` | CSS selector HTML filter (stdin→selector→html/text/attr/json) |
 | `realpath-my` | Pure bash realpath(1) replacement (no coreutils) |
 | `rssh` | Sync directory to remote host, run commands |
+| `shsubst` | Shell template substitution (full bash heredoc syntax) |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
 | `tabexec` | Execute commands, format output as aligned table |

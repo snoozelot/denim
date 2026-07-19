@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# shsubst - shell template substitution
+#
+# Evaluates input as a bash heredoc, supporting full shell syntax:
+# $VAR, ${VAR:-default}, $(cmd), $((expr)), etc.
+#
+# Usage:
+#   shsubst [FILE...]
+#
+# If no files given, reads stdin. Multiple files are concatenated.
+#
+# Examples:
+#   shsubst < config.tmpl
+#   shsubst header.tmpl body.tmpl
+#   echo 'Hello $(whoami), today is $(date +%F)' | shsubst
+#
+# Warning: This executes shell commands! Only use with trusted input.
+
+set -euo pipefail
+
+INPUT=$(cat "$@")
+eval "cat <<EOF
+$INPUT
+EOF"
