@@ -50,6 +50,7 @@ C source (with bash alternatives): `prefix.c`, `path-expand.c`/`.sh`, `path-shor
 |------|---------|
 | `memento-mori-cal` | Visualize your life in weeks (ASCII grid) |
 | `proquint` | Encode/decode numbers as pronounceable identifiers |
+| `tankfahrt` | Break-even analysis for detour to cheaper gas station |
 | `worth-the-time-xkcd-1205` | Calculate if automation saves time |
 | `spell-number` | Convert integers to words (`-l en\|de\|fr\|ru`) |
 | `spell-topic` | Multilingual vocabulary cheat sheet |
