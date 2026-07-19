@@ -1,0 +1,408 @@
+#!/bin/bash
+# realpath-my — Pure bash realpath(1) replacement
+#
+# Resolves file paths to canonical absolute paths — no coreutils realpath.
+# Uses only bash builtins and POSIX readlink.
+#
+# USAGE
+#
+#   realpath-my [OPTION]... FILE...
+#
+# OPTIONS
+#
+#   -E, --canonicalize            All but last component must exist (default)
+#   -e, --canonicalize-existing   All components must exist
+#   -m, --canonicalize-missing    No components need exist
+#   -L, --logical                 Resolve .. before symlinks
+#   -P, --physical                Resolve symlinks as encountered (default)
+#   -s, --strip, --no-symlinks    Don't expand symlinks
+#   -q, --quiet                   Suppress error messages
+#   --relative-to=DIR             Print path relative to DIR
+#   --relative-base=DIR           Print absolute unless paths under DIR
+#   -h, --help                    Display this help
+#
+# EXAMPLES
+#
+#   realpath-my foo/bar              -> /current/dir/foo/bar
+#   realpath-my -s foo/../bar        -> /current/dir/bar
+#   realpath-my -m /nonexistent      -> /nonexistent (no error)
+#   realpath-my --relative-to=/a /a/b/c  -> b/c
+#
+# EXIT CODES
+#
+#   0   All paths resolved
+#   1   Component missing (in -e/-E mode)
+#
+# -----------------------------------------------------------------------------
+# Implementation details below.
+# -----------------------------------------------------------------------------
+#
+# WHAT IT DOES
+#
+# Makes paths absolute, resolves symlinks (or not, per --strip),
+# normalizes . and .. components.  Result is always a clean absolute path
+# with no . or .. and (by default) no symlinks.
+# Supports the same options as coreutils realpath.
+#
+# WHY
+#
+# Drops the dependency on coreutils realpath for scripts on minimal systems
+# (containers, busybox) or where consistent behavior across platforms matters.
+#
+# HOW IT WORKS
+#
+# Each path goes through three phases:
+#
+#   1.  make_absolute — prepend PWD for relative paths, collapse ////
+#   2.  check_existence — validate path components per -m/-e/-E flag
+#   3.  mode-specific resolution:
+#         strip:  tokenize → collapse . and .. → join
+#         logical: tokenize → collapse . and .. → resolve symlinks
+#         physical (default): tokenize → resolve symlinks as encountered
+#
+# The core walker processes components left to right.  When a component is a
+# symlink, it reads the target, rebuilds the full path from target + remaining
+# components, and restarts.  Handles chains of symlinks, relative targets
+# containing ../, and symlinks to symlinks — no guard needed, readlink fails
+# on loops.
+#
+# -P and -L differ only in the order of .. resolution vs symlink resolution.
+# Both use the same walker; -L calls collapse_dots first.
+#
+# DEPENDENCIES
+#
+#   POSIX: readlink (for symlink resolution)
+#   Otherwise pure bash — no realpath binary needed
+
+set -euo pipefail
+
+# ============================================================================
+# Predicates
+# ============================================================================
+
+got()       { [[ -n $1 ]]; }
+no()        { [[ -z $1 ]]; }
+is_abs()    { [[ $1 == /* ]]; }
+has_arguments() { [[ $# -gt 0 ]]; }
+file_at()   { [[ -e $1 ]]; }
+
+# ============================================================================
+# Path utilities
+# ============================================================================
+
+# Split PATH into components (global PARTS), drop trailing empty from / ending
+tokenize() {
+    local IFS='/'
+    read -ra PARTS <<< "$1"
+    unset IFS
+
+    if [[ ${#PARTS[@]} -gt 0 ]] && [[ -z "${PARTS[${#PARTS[@]}-1]}" ]]; then
+        PARTS=("${PARTS[@]:0:${#PARTS[@]}-1}")
+    fi
+}
+
+# Collapse . and .. in PARTS in place
+collapse_dots() {
+    local OUT=()
+    local C
+
+    for C in "${PARTS[@]}"; do
+        case $C in
+            ""|.)
+                ;;
+            ..)
+                if [[ ${#OUT[@]} -gt 0 ]]; then
+                    OUT=("${OUT[@]:0:${#OUT[@]}-1}")
+                fi
+                ;;
+            *)
+                OUT+=("$C")
+                ;;
+        esac
+    done
+    PARTS=("${OUT[@]}")
+}
+
+# Make PATH absolute relative to PWD, normalize ///
+make_absolute() {
+    local P=$1
+
+    if no "$P"; then P=$PWD; fi
+    if ! is_abs "$P"; then P="$PWD/$P"; fi
+
+    while [[ $P == *//* ]]; do
+        P=${P//\/\//\/}
+    done
+    printf '%s' "$P"
+}
+
+# Build absolute path from components
+join_absolute() {
+    local RES=""
+    local C
+    local LEADING="/"
+
+    for C; do
+        if no "$C"; then continue; fi
+        RES="$RES$C/"
+    done
+    printf '%s' "$LEADING${RES%/}"
+}
+
+# ============================================================================
+# Existence checking
+# ============================================================================
+
+# EXIST_MODE: 2=all (-e), 1=all-but-last (-E default), 0=missing-ok (-m)
+check_existence() {
+    local PATHSTR=$1
+    local EXIST_MODE=$2
+
+    if [[ $EXIST_MODE -eq 0 ]]; then return 0; fi
+    if [[ $EXIST_MODE -eq 2 ]]; then
+        if file_at "$PATHSTR"; then return 0; fi
+        return 1
+    fi
+
+    # EXIST_MODE 1: all but last must exist
+    tokenize "$PATHSTR"
+    if [[ ${#PARTS[@]} -le 1 ]]; then
+        if file_at "/"; then return 0; fi
+        return 1
+    fi
+
+    local PARENT=${PATHSTR%/*}
+    if file_at "${PARENT:-/}"; then return 0; fi
+    return 1
+}
+
+# ============================================================================
+# Symlink resolution — physical mode (resolve as encountered)
+# ============================================================================
+
+# Walk path components left to right. When a component is a symlink,
+# rebuild the full path from its target + remaining components and restart.
+resolve_physical() {
+    local FULLPATH=$1
+    local RESOLVED
+    local PART LINK_TARGET REMAINING
+    local I J
+    local SYMLINK_FOUND
+
+    while :; do
+        tokenize "$FULLPATH"
+        RESOLVED="/"
+        SYMLINK_FOUND=0
+
+        for ((I=0; I<${#PARTS[@]}; I++)); do
+            PART=${PARTS[$I]}
+            if [[ -z "$PART" ]]; then continue; fi
+
+            case $PART in
+                .)
+                    continue
+                    ;;
+                ..)
+                    RESOLVED=${RESOLVED%/}
+                    RESOLVED=${RESOLVED%/*}
+                    if [[ -z "$RESOLVED" ]]; then RESOLVED="/"; fi
+                    continue
+                    ;;
+                *)
+                    ;;
+            esac
+
+            if [[ "$RESOLVED" != */ ]]; then RESOLVED="$RESOLVED/"; fi
+            RESOLVED="$RESOLVED$PART"
+
+            if [[ -L "$RESOLVED" ]]; then
+                LINK_TARGET=$(readlink "$RESOLVED") || return 1
+
+                REMAINING=
+                for ((J=I+1; J<${#PARTS[@]}; J++)); do
+                    REMAINING="$REMAINING/${PARTS[$J]}"
+                done
+
+                if is_abs "$LINK_TARGET"; then
+                    FULLPATH="$LINK_TARGET$REMAINING"
+                else
+                    FULLPATH="${RESOLVED%/*}/$LINK_TARGET$REMAINING"
+                fi
+
+                SYMLINK_FOUND=1
+                break
+            fi
+        done
+
+        if [[ $SYMLINK_FOUND -eq 0 ]]; then break; fi
+    done
+
+    printf '%s\n' "$RESOLVED"
+}
+
+# ============================================================================
+# Full resolve pipeline
+# ============================================================================
+
+resolve_one() {
+    local PATHSTR=$1
+    local RESOLVE_MODE=$2   # physical|logical|strip
+    local EXIST_MODE=$3     # 0=-m, 1=-E, 2=-e
+    local QUIET=$4
+
+    PATHSTR=$(make_absolute "$PATHSTR")
+
+    if ! check_existence "$PATHSTR" "$EXIST_MODE"; then
+        if no "$QUIET"; then
+            printf 'realpath-my: %s: No such file or directory\n' "$PATHSTR" >&2
+        fi
+        return 1
+    fi
+
+    case $RESOLVE_MODE in
+        strip)
+            tokenize "$PATHSTR"
+            collapse_dots
+            printf '%s\n' "$(join_absolute "${PARTS[@]}")"
+            ;;
+        logical)
+            tokenize "$PATHSTR"
+            collapse_dots
+            resolve_physical "$(join_absolute "${PARTS[@]}")"
+            ;;
+        physical)
+            resolve_physical "$PATHSTR"
+            ;;
+    esac
+}
+
+# ============================================================================
+# Relative path from BASE to TARGET
+# ============================================================================
+
+make_relative() {
+    local BASE=$1
+    local TARGET=$2
+    local BP
+    local TP
+    local I
+    local COMMON
+    local UP
+    local DOWN
+
+    BASE=${BASE%/}
+    TARGET=${TARGET%/}
+
+    if [[ "$BASE" == "$TARGET" ]]; then
+        printf '.'
+        return 0
+    fi
+
+    tokenize "$BASE"
+    BP=("${PARTS[@]}")
+    tokenize "$TARGET"
+    TP=("${PARTS[@]}")
+
+    # Find common prefix
+    I=0
+    while [[ $I -lt ${#BP[@]} ]] && [[ $I -lt ${#TP[@]} ]] && [[ "${BP[$I]}" == "${TP[$I]}" ]]; do
+        I=$((I+1))
+    done
+    COMMON=$I
+
+    # Up from base
+    UP=
+    for ((I=COMMON; I<${#BP[@]}; I++)); do
+        UP="${UP}../"
+    done
+
+    # Down to target
+    DOWN=
+    for ((I=COMMON; I<${#TP[@]}; I++)); do
+        DOWN="${DOWN}${TP[$I]}/"
+    done
+    DOWN=${DOWN%/}
+
+    printf '%s%s' "$UP" "$DOWN"
+    return 0
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    local RESOLVE_MODE="physical"
+    local EXIST_MODE=1
+    local QUIET=
+    local RELATIVE_TO=
+    local RELATIVE_BASE=
+    local RC=0
+    local RESOLVED
+    local RESOLVED2
+    local PATHS
+    local PATHSTR
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -E|--canonicalize)           EXIST_MODE=1; shift ;;
+            -e|--canonicalize-existing)  EXIST_MODE=2; shift ;;
+            -m|--canonicalize-missing)   EXIST_MODE=0; shift ;;
+            -L|--logical)                RESOLVE_MODE="logical"; shift ;;
+            -P|--physical)               RESOLVE_MODE="physical"; shift ;;
+            -q|--quiet)                  QUIET=1; shift ;;
+            --relative-to=*)
+                RELATIVE_TO=${1#*=}
+                if no "$RELATIVE_TO"; then
+                    printf 'realpath-my: --relative-to requires a value\n' >&2
+                    return 1
+                fi
+                shift
+                ;;
+            --relative-base=*)
+                RELATIVE_BASE=${1#*=}
+                if no "$RELATIVE_BASE"; then
+                    printf 'realpath-my: --relative-base requires a value\n' >&2
+                    return 1
+                fi
+                shift
+                ;;
+            -s|--strip|--no-symlinks)   RESOLVE_MODE="strip"; shift ;;
+            -h|--help)                  sed -n '2,/^# -/ { /^# -/d; s/^# \?//p }' "$0"; return 0 ;;
+            --) shift; break ;;
+            -?*)
+                printf 'realpath-my: unknown option: %s\n' "$1" >&2
+                return 1
+                ;;
+            *) break ;;
+        esac
+    done
+
+    if has_arguments "$@"; then
+        PATHS=("$@")
+    else
+        PATHS=("")
+    fi
+
+    for PATHSTR in "${PATHS[@]}"; do
+        RESOLVED=$(resolve_one "$PATHSTR" "$RESOLVE_MODE" "$EXIST_MODE" "$QUIET") || { RC=1; continue; }
+
+        if got "$RELATIVE_TO"; then
+            RESOLVED2=$(resolve_one "$RELATIVE_TO" "$RESOLVE_MODE" "$EXIST_MODE" "$QUIET") || { RC=1; continue; }
+            RESOLVED=$(make_relative "$RESOLVED2" "$RESOLVED")
+        fi
+
+        if got "$RELATIVE_BASE"; then
+            RESOLVED2=$(resolve_one "$RELATIVE_BASE" "$RESOLVE_MODE" 1 "$QUIET") || { RC=1; continue; }
+            if [[ "$RESOLVED" == "$RESOLVED2"/* ]] || [[ "$RESOLVED" == "$RESOLVED2" ]]; then
+                RESOLVED=$(make_relative "$RESOLVED2" "$RESOLVED")
+            fi
+        fi
+
+        printf '%s\n' "$RESOLVED"
+    done
+
+    return $RC
+}
+
+main "$@"

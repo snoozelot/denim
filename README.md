@@ -29,6 +29,7 @@ Shell tools organized into useful **screws**, and **toys**.
 | `pdsc` | List process descendants |
 | `playerctl-my` | MPRIS media player control via D-Bus (no glib deps) |
 | `pup.js` | CSS selector HTML filter (stdin→selector→html/text/attr/json) |
+| `realpath-my` | Pure bash realpath(1) replacement (no coreutils) |
 | `rssh` | Sync directory to remote host, run commands |
 | `slay` | Kill processes with SIGKILL |
 | `soak` | Read all stdin, then write to file |
