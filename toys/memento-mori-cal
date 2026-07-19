@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memento-mori-cal-my — Memento Mori Calendar: your life in weeks
+# memento-mori-cal — Memento Mori Calendar: your life in weeks
 #
 # WHAT IT DOES
 #   Prints a visual calendar showing your entire life as a grid of weeks.
@@ -13,14 +13,14 @@
 #   in the leading column (the 53rd-week slot).
 #
 # USAGE
-#   memento-mori-cal-my YYYY-MM-DD LIFESPAN_YEARS [PAST] [CURRENT] [FUTURE]
-#   memento-mori-cal-my --birthdate YYYY-MM-DD --lifespan YEARS \
+#   memento-mori-cal YYYY-MM-DD LIFESPAN_YEARS [PAST] [CURRENT] [FUTURE]
+#   memento-mori-cal --birthdate YYYY-MM-DD --lifespan YEARS \
 #       [--past-symbol X] [--current-symbol .] [--future-symbol .]
 #
 # EXAMPLES
-#   memento-mori-cal-my 1990-01-01 90
-#   memento-mori-cal-my 1990-01-01 90 X o .
-#   memento-mori-cal-my --birthdate 1990-01-01 --lifespan 90
+#   memento-mori-cal 1990-01-01 90
+#   memento-mori-cal 1990-01-01 90 X o .
+#   memento-mori-cal --birthdate 1990-01-01 --lifespan 90
 
 set -euo pipefail
 
