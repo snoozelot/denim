@@ -1,0 +1,276 @@
+#!/bin/bash
+# proquint — encode/decode numbers as pronounceable identifiers
+#
+# WHAT IT DOES
+# Converts between numbers (hex, decimal, octal, binary, dotted-quad IP)
+# and proquints — 5-letter pronounceable words (CVCVC) encoding 16 bits each.
+# A proquint encodes 16 bits in 5 characters: consonant-vowel-consonant-vowel-consonant.
+# Multiple 16-bit words are dash-separated.
+#
+# WHY
+# Identifiers (IPs, hashes, memory addresses) are treated as numbers but never
+# used arithmetically. Proquints make identifiers pronounceable, spellable, and
+# typeable by humans — at the cost of one format detection pass.
+# See arXiv:0901.4016v2.
+#
+# HOW IT WORKS
+# 1. Parse input to decimal (format specified by -f, or --decode for proquint)
+# 2. Format decimal to all output representations (hex, dec, oct, bin, IP, proquint)
+# 3. Select which representation(s) to print
+# All parsing happens first, all formatting second — uniform inside, vary at boundaries.
+#
+# USAGE
+#   proquint [OPTIONS] [VALUE...]
+#
+# OPTIONS
+#   -f, --from FORMAT   input format: dec, hex, oct, bin, ip, proquint (required)
+#   -o, --output FORMAT output: hex, dec, oct, bin, ip, proquint, all (default)
+#   --decode            shorthand for -f proquint
+#   -h, --help          show this message
+#
+# EXAMPLES
+#   proquint -f dec 42               # decimal
+#   proquint -f hex ff               # hex
+#   proquint -f ip 127.0.0.1         # IP
+#   proquint -f oct 077              # octal
+#   proquint -f bin 11111111         # binary
+#   proquint --decode lusab-babad    # decode proquint
+#
+# EXIT CODES
+#   0  success
+#   1  input error (unknown format, unparseable value, unknown option)
+#
+# DEPENDENCIES
+#   bash 4+ (associative arrays for reverse lookup tables)
+#
+# END HEADER
+
+set -euo pipefail
+
+# ── Constants ────────────────────────────────────────────────────────────────
+# 16 unambiguous consonants (4 bits), 4 unambiguous vowels (2 bits)
+# Per arXiv:0901.4016v2 specification
+
+readonly CONS=(b d f g h j k l m n p r s t v z)
+readonly VOWEL=(a i o u)
+
+# Build reverse lookup tables for decoding
+declare -A CONS_REV
+declare -A VOWEL_REV
+for I in "${!CONS[@]}"; do CONS_REV[${CONS[$I]}]=$I; done
+for I in "${!VOWEL[@]}"; do VOWEL_REV[${VOWEL[$I]}]=$I; done
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+
+die() { echo "$*" >&2; exit 1; }
+got() { [[ -n $1 ]]; }
+
+# ── Core proquint encode/decode ──────────────────────────────────────────────
+
+# Encode a 16-bit word as 5-char CVCVC
+proquint16() {
+    local W=$1
+    local C1 V1 C2 V2 C3
+
+    C1=${CONS[$(( (W >> 12) & 0xF ))]}
+    V1=${VOWEL[$(( (W >> 10) & 0x3 ))]}
+    C2=${CONS[$(( (W >> 6) & 0xF ))]}
+    V2=${VOWEL[$(( (W >> 4) & 0x3 ))]}
+    C3=${CONS[$(( W & 0xF ))]}
+
+    echo "${C1}${V1}${C2}${V2}${C3}"
+}
+
+# Decode a 5-char CVCVC back to 16-bit word
+unproquint16() {
+    local WORD=$1
+    local C1 V1 C2 V2 C3
+
+    C1=${WORD:0:1}
+    V1=${WORD:1:1}
+    C2=${WORD:2:1}
+    V2=${WORD:3:1}
+    C3=${WORD:4:1}
+
+    echo $(( (CONS_REV[$C1] << 12) \
+           | (VOWEL_REV[$V1] << 10) \
+           | (CONS_REV[$C2] << 6)  \
+           | (VOWEL_REV[$V2] << 4)  \
+           | CONS_REV[$C3] ))
+}
+
+# ── Number formatters (decimal → output format) ─────────────────────────────
+
+to_hex()   { printf "%x\n" "$1"; }
+to_oct()   { printf "0%o\n" "$1"; }
+to_bin() {
+    local D=$1 OUT=""
+
+    while [[ $D -gt 0 ]]; do
+        OUT="$(( D & 1 ))$OUT"
+        D=$(( D >> 1 ))
+    done
+
+    echo "0b${OUT:-0}"
+}
+
+to_ip() {
+    local D=$1
+
+    printf "%d.%d.%d.%d\n" \
+        $(( (D >> 24) & 0xFF )) \
+        $(( (D >> 16) & 0xFF )) \
+        $(( (D >> 8) & 0xFF ))  \
+        $(( D & 0xFF ))
+}
+
+# Split a decimal number into 16-bit words (MSB first)
+split_into_16bit_words() {
+    local HEX=$1 LEN PAD I
+
+    HEX=$(to_hex "$HEX")
+    LEN=${#HEX}
+    PAD=$(( (4 - LEN % 4) % 4 ))
+    HEX=$(printf "%0${PAD}s$HEX" | tr ' ' '0')
+
+    for (( I=0; I<${#HEX}; I+=4 )); do
+        echo $(( 16#${HEX:I:4} ))
+    done
+}
+
+# Format decimal as proquint string (dash-separated words)
+to_proquint() {
+    local D=$1 WORD
+    local OUT=""
+
+    for WORD in $(split_into_16bit_words "$D"); do
+        OUT="${OUT}-$(proquint16 "$WORD")"
+    done
+
+    echo "${OUT#-}"
+}
+
+# ── Input parsers (input string → decimal) ──────────────────────────────────
+# All parsers accept a value in their format, output decimal string.
+# Boundary: parse to canonical (decimal) form immediately.
+
+ip_to_dec() {
+    local IFS
+    local PARTS
+
+    IFS=.
+    PARTS=($1)
+    echo $(( (PARTS[0] << 24) | (PARTS[1] << 16) | (PARTS[2] << 8) | PARTS[3] ))
+}
+
+hex_to_dec() { printf "%d" "$(( 16#${1#0x} ))"; }
+oct_to_dec() { printf "%d" "$(( 8#${1#0o} ))"; }
+bin_to_dec() { printf "%d" "$(( 2#${1#0b} ))"; }
+dec_to_dec() { printf "%d" "$(( 10#$1 ))"; }
+
+
+
+proquint_to_dec() {
+    local VAL=$1 WORDS HEX WORD
+
+    IFS='-' read -ra WORDS <<< "$VAL"
+    HEX=""
+
+    for WORD in "${WORDS[@]}"; do
+        HEX=$(printf "%s%04x" "$HEX" "$(unproquint16 "$WORD")")
+    done
+
+    HEX=${HEX##+(0)}
+    HEX=${HEX:-0}
+    printf "%d" "$(( 16#$HEX ))"
+}
+
+# ── Format dispatch ──────────────────────────────────────────────────────────
+
+# Emit a single formatted representation
+# Only computes the format requested — not all six
+emit_format() {
+    local FMT=$1 D=$2
+
+    case "$FMT" in
+        hex)      to_hex "$D" ;;
+        dec)      echo "$D" ;;
+        oct)      to_oct "$D" ;;
+        bin)      to_bin "$D" ;;
+        ip)       to_ip "$D" ;;
+        proquint) to_proquint "$D" ;;
+    esac
+}
+
+# Emit all six representations labelled
+emit_all() {
+    local D=$1
+    local HEX BIN IP PROQ OCT
+
+    HEX=$(to_hex "$D")
+    OCT=$(to_oct "$D")
+    BIN=$(to_bin "$D")
+    IP=$(to_ip "$D")
+    PROQ=$(to_proquint "$D")
+
+    echo "  hex:      $HEX"
+    echo "  dec:      $D"
+    echo "  oct:      $OCT"
+    echo "  bin:      $BIN"
+    echo "  ip:       $IP"
+    echo "  proquint: $PROQ"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    local OUT=all
+    local DECODE=0
+    local DEC VAL F FROM
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                sed -n '2,/^# END HEADER/p' "$0" | sed '/^#$/c\\' | sed '/^# /s/^# //' | head -n -1
+                exit 0
+                ;;
+            -f|--from) FROM=$2; shift 2 ;;
+            -o|--output) OUT=$2; shift 2 ;;
+            --decode) DECODE=1; shift ;;
+            --) shift; break ;;
+            -*) die "unknown option: $1" ;;
+            *) break ;;
+        esac
+    done
+
+    got "$*" || die "usage: proquint [-f FMT] [-o FMT] [--decode] VALUE..."
+    [[ $DECODE -eq 1 || -n ${FROM:-} ]] || die "usage: proquint: -f FORMAT required (dec, hex, oct, bin, ip, proquint)"
+
+    for VAL in "$@"; do
+        if [[ $DECODE -eq 1 ]]; then
+            DEC=$(proquint_to_dec "$VAL")
+        else
+            case "$FROM" in
+                hex)      DEC=$(hex_to_dec "$VAL") ;;
+                dec)      DEC=$(dec_to_dec "$VAL") ;;
+                oct)      DEC=$(oct_to_dec "$VAL") ;;
+                bin)      DEC=$(bin_to_dec "$VAL") ;;
+                ip)       DEC=$(ip_to_dec "$VAL") ;;
+                proquint) DEC=$(proquint_to_dec "$VAL") ;;
+                *)        die "unknown input format: $FROM" ;;
+            esac
+        fi
+
+        if [[ "$OUT" = all ]]; then
+            emit_all "$DEC"
+        else
+            IFS_SAVE=$IFS; IFS=','
+            for F in $OUT; do
+                IFS=$IFS_SAVE
+                emit_format "$F" "$DEC"
+            done
+        fi
+    done
+}
+
+main "$@"

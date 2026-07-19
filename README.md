@@ -47,6 +47,7 @@ C source (with bash alternatives): `prefix.c`, `path-expand.c`/`.sh`, `path-shor
 | Tool | Purpose |
 |------|---------|
 | `memento-mori-cal` | Visualize your life in weeks (ASCII grid) |
+| `proquint` | Encode/decode numbers as pronounceable identifiers |
 | `worth-the-time-xkcd-1205` | Calculate if automation saves time |
 | `spell-number` | Convert integers to words (`-l en\|de\|fr\|ru`) |
 | `spell-topic` | Multilingual vocabulary cheat sheet |
